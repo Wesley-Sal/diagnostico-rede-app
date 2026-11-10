@@ -583,123 +583,199 @@ class _DnsScreenState extends State<DnsScreen> {
   }
 }
 
-// ========================= MAPA (cômodos + bip) =========================
-class _Comodo { String nome; int? sinal; _Comodo(this.nome, [this.sinal]); }
+// ========================= MAPA DE CALOR (planta + 2.4/5 + diagnóstico) =========================
+class _Ponto {
+  final Offset rel; // posição relativa (0..1) no canvas
+  int? s24;
+  int? s5;
+  _Ponto(this.rel, {this.s24, this.s5});
+}
+
+Color heatJet(double v) {
+  v = v.clamp(0.0, 1.0);
+  const cs = [Color(0xFF1E3A8A), Color(0xFF06B6D4), Color(0xFF22C55E), Color(0xFFF59E0B), Color(0xFFEF4444)];
+  final x = v * (cs.length - 1);
+  final i = x.floor().clamp(0, cs.length - 2);
+  return Color.lerp(cs[i], cs[i + 1], x - i)!;
+}
 
 class MapaScreen extends StatefulWidget {
   const MapaScreen({super.key});
   @override
   State<MapaScreen> createState() => _MapaScreenState();
 }
+
 class _MapaScreenState extends State<MapaScreen> {
-  final List<_Comodo> _comodos = [];
-  bool _detector = false, _som = true;
-  int _sinal = 0;
-  String? _bssid;
-  Timer? _amostra, _bip;
-  int _tick = 0;
+  final List<_Ponto> _pts = [];
+  String _banda = '2.4';
+  bool _medindo = false;
+  String? _ssid;
 
-  Future<int?> _lerSinal() async {
+  Future<(int?, int?)> _medirBandas() async {
     try {
-      if (_tick % 3 == 0) { final can = await WiFiScan.instance.canStartScan(); if (can == CanStartScan.yes) await WiFiScan.instance.startScan(); }
-      _tick++;
+      final can = await WiFiScan.instance.canStartScan();
+      if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(milliseconds: 600)); }
       final res = await WiFiScan.instance.getScannedResults();
-      int? lvl;
-      if (_bssid != null && _bssid!.isNotEmpty) { final m = res.where((r) => r.bssid.toLowerCase() == _bssid!.toLowerCase()); if (m.isNotEmpty) lvl = m.first.level; }
-      lvl ??= res.isEmpty ? null : res.map((r) => r.level).reduce(max);
-      return lvl == null ? null : rssiParaPorcento(lvl);
-    } catch (_) { return null; }
+      _ssid ??= (await NetworkInfo().getWifiName())?.replaceAll('"', '');
+      Iterable<WiFiAccessPoint> meu = res;
+      if (_ssid != null && _ssid!.isNotEmpty) { final f = res.where((r) => r.ssid == _ssid); if (f.isNotEmpty) meu = f; }
+      int? best(String b) {
+        final g = meu.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == b);
+        return g.isEmpty ? null : rssiParaPorcento(g.map((r) => r.level).reduce(max));
+      }
+      return (best('2.4'), best('5'));
+    } catch (_) { return (null, null); }
   }
 
-  Future<void> _ligarDetector() async {
+  Future<void> _tocar(Offset rel) async {
     await Permission.locationWhenInUse.request();
-    try { _bssid = await NetworkInfo().getWifiBSSID(); } catch (_) {}
-    setState(() { _detector = true; _tick = 0; });
-    _amostra = Timer.periodic(const Duration(milliseconds: 1200), (_) async {
-      final s = await _lerSinal();
-      if (s != null) { setState(() => _sinal = s); _reBip(); }
-    });
-  }
-  void _desligarDetector() { _amostra?.cancel(); _bip?.cancel(); setState(() => _detector = false); }
-  void _reBip() {
-    _bip?.cancel();
-    if (!_detector || !_som || _sinal <= 0) return;
-    final intervalo = (1000 - _sinal * 8.5).clamp(120, 1000).toInt();
-    _bip = Timer.periodic(Duration(milliseconds: intervalo), (_) { SystemSound.play(SystemSoundType.click); HapticFeedback.selectionClick(); });
+    setState(() => _medindo = true);
+    final (a, b) = await _medirBandas();
+    if (mounted) setState(() { _pts.add(_Ponto(rel, s24: a, s5: b)); _medindo = false; });
   }
 
-  Future<void> _medir(_Comodo c) async {
-    await Permission.locationWhenInUse.request();
-    if (_bssid == null) { try { _bssid = await NetworkInfo().getWifiBSSID(); } catch (_) {} }
-    final s = _detector ? _sinal : await _lerSinal();
-    if (s != null) setState(() => c.sinal = s);
-  }
+  int? _val(_Ponto p) => _banda == '2.4' ? p.s24 : p.s5;
 
-  void _novoComodo() {
-    final ctrl = TextEditingController();
-    showDialog(context: context, builder: (ctx) => AlertDialog(
-      backgroundColor: kCard,
-      title: const Text('Novo cômodo', style: TextStyle(color: kTxt)),
-      content: TextField(controller: ctrl, autofocus: true, style: const TextStyle(color: kTxt), decoration: campoDeco('ex: Sala, Quarto, Cozinha')),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
-        FilledButton(onPressed: () { final nome = ctrl.text.trim(); Navigator.pop(ctx); setState(() => _comodos.add(_Comodo(nome.isEmpty ? 'Cômodo ${_comodos.length + 1}' : nome))); }, child: const Text('Adicionar')),
-      ],
-    ));
+  String _diagnostico() {
+    final vals = _pts.map(_val).whereType<int>().toList();
+    if (vals.isEmpty) return 'Meça alguns pontos (toque na planta em cada parte da casa) para o diagnóstico.';
+    final mn = vals.reduce(min), mx = vals.reduce(max);
+    final media = vals.reduce((x, y) => x + y) / vals.length;
+    final fracos = _pts.where((p) { final v = _val(p); return v != null && v < 40; }).length;
+    final sb = StringBuffer();
+    sb.writeln('Banda $_banda GHz — pontos: ${vals.length} | média: ${media.toStringAsFixed(0)}% | pior: $mn% | melhor: $mx%');
+    if (mn < 30 || fracos >= 2) {
+      sb.writeln('\n⚠ REPETIDOR RECOMENDADO: há $fracos ponto(s) com sinal fraco (<40%). Instale um repetidor/mesh entre o roteador e a área mais fraca.');
+    } else if (mn < 50) {
+      sb.writeln('\nATENÇÃO: cobertura no limite em alguns pontos. Um repetidor pode ajudar se houver quedas nessas áreas.');
+    } else {
+      sb.writeln('\n✓ Cobertura boa nesta banda — provavelmente não precisa de repetidor.');
+    }
+    if (_banda == '5') sb.writeln('Obs.: o 5 GHz é mais rápido porém alcança menos. Quedas longe do roteador são normais — o 2.4 GHz cobre melhor as áreas distantes.');
+    return sb.toString();
   }
-
-  @override
-  void dispose() { _amostra?.cancel(); _bip?.cancel(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
-    final medidos = _comodos.where((c) => c.sinal != null).toList();
-    _Comodo? melhor, pior;
-    if (medidos.isNotEmpty) {
-      melhor = medidos.reduce((a, b) => a.sinal! >= b.sinal! ? a : b);
-      pior = medidos.reduce((a, b) => a.sinal! <= b.sinal! ? a : b);
-    }
-    final cor = heatColor(_sinal);
     return ListView(children: [
-      Secao(titulo: '📍 Mapa de Sinal por Cômodo', desc: 'Cadastre os cômodos e meça o sinal em cada um. Ligue o detector pra achar o melhor ponto "de ouvido" (o bip acelera quando o sinal é mais forte).', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        // Detector ao vivo
-        Container(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(14), border: Border.all(color: cor.withValues(alpha: .6), width: 2)),
-          child: Column(children: [
-            Text('$_sinal%', style: TextStyle(fontSize: 40, fontWeight: FontWeight.w800, color: cor, height: 1)),
-            Text(_detector ? 'detector ligado' : 'detector desligado', style: const TextStyle(color: kMuted, fontSize: 12)),
+      Secao(
+        titulo: '📍 Mapa de Calor do Wi-Fi',
+        desc: 'Ande pela casa e toque na planta no ponto onde você está — o app mede o sinal ali e pinta o mapa de calor (vermelho = forte, azul = fraco). Mede 2.4 e 5 GHz.',
+        filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          // Alternância de banda
+          Row(children: ['2.4', '5'].map((b) {
+            final sel = _banda == b;
+            return Expanded(child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: GestureDetector(
+                onTap: () => setState(() => _banda = b),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    gradient: sel ? const LinearGradient(colors: [kAccent, kAccent2]) : null,
+                    color: sel ? null : kCard2,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text('$b GHz', style: TextStyle(color: sel ? const Color(0xFF041320) : kMuted, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            ));
+          }).toList()),
+          const SizedBox(height: 12),
+          // Canvas do mapa de calor
+          LayoutBuilder(builder: (ctx, cons) {
+            final w = cons.maxWidth, h = 340.0;
+            return GestureDetector(
+              onTapDown: (d) => _tocar(Offset(d.localPosition.dx / w, d.localPosition.dy / h)),
+              child: Container(
+                width: w, height: h,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0A1020),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: kLine),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: CustomPaint(size: Size(w, h), painter: _HeatPainter(_pts, _banda)),
+              ),
+            );
+          }),
+          const SizedBox(height: 8),
+          // Legenda
+          Row(children: [
+            const Text('fraco', style: TextStyle(color: kMuted, fontSize: 11)),
+            const SizedBox(width: 6),
+            Expanded(child: Container(height: 10, decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(999),
+              gradient: const LinearGradient(colors: [Color(0xFF1E3A8A), Color(0xFF06B6D4), Color(0xFF22C55E), Color(0xFFF59E0B), Color(0xFFEF4444)]),
+            ))),
+            const SizedBox(width: 6),
+            const Text('forte', style: TextStyle(color: kMuted, fontSize: 11)),
           ]),
-        ),
-        const SizedBox(height: 10),
-        Row(children: [
-          Expanded(child: BotaoRun(_detector ? 'Parar detector' : 'Ligar detector', cor: _detector ? kBad : kAccent2, onTap: _detector ? _desligarDetector : _ligarDetector)),
-          const SizedBox(width: 10),
-          IconButton.filledTonal(onPressed: () => setState(() { _som = !_som; _reBip(); }), icon: Icon(_som ? Icons.volume_up : Icons.volume_off)),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(child: Text(_medindo ? 'medindo ponto...' : '${_pts.length} ponto(s) marcado(s)', style: const TextStyle(color: kMuted, fontSize: 12))),
+            TextButton.icon(onPressed: _pts.isEmpty ? null : () => setState(() => _pts.clear()), icon: const Icon(Icons.delete_outline, size: 18), label: const Text('Limpar')),
+          ]),
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)),
+            child: Text(_diagnostico(), style: const TextStyle(color: kTxt, fontSize: 13)),
+          ),
+          const SizedBox(height: 8),
+          const Text('Dica: marque pontos em cada cômodo (sala, quartos, cozinha, garagem). Quanto mais pontos, mais preciso o mapa.', style: TextStyle(color: kMuted, fontSize: 11)),
         ]),
-        const Divider(height: 28, color: kLine),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          const Text('Cômodos', style: TextStyle(fontWeight: FontWeight.bold, color: kTxt)),
-          TextButton.icon(onPressed: _novoComodo, icon: const Icon(Icons.add, size: 18), label: const Text('Cômodo')),
-        ]),
-        if (_comodos.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Nenhum cômodo ainda. Toque em "Cômodo" para adicionar.', style: TextStyle(color: kMuted, fontSize: 13))),
-        ..._comodos.map((c) => Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Row(children: [
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(c.nome, style: const TextStyle(fontWeight: FontWeight.w600)),
-            const SizedBox(height: 4),
-            ClipRRect(borderRadius: BorderRadius.circular(8), child: LinearProgressIndicator(value: (c.sinal ?? 0) / 100, minHeight: 10, backgroundColor: kCard2, color: c.sinal == null ? kCard2 : heatColor(c.sinal!))),
-          ])),
-          const SizedBox(width: 10),
-          SizedBox(width: 48, child: Text(c.sinal == null ? '—' : '${c.sinal}%', textAlign: TextAlign.right, style: TextStyle(fontWeight: FontWeight.bold, color: c.sinal == null ? kMuted : heatColor(c.sinal!)))),
-          IconButton(onPressed: () => _medir(c), icon: const Icon(Icons.wifi_find, color: kAccent), tooltip: 'Medir aqui'),
-          IconButton(onPressed: () => setState(() => _comodos.remove(c)), icon: const Icon(Icons.close, color: kMuted, size: 18)),
-        ]))),
-        if (melhor != null) Container(margin: const EdgeInsets.only(top: 8), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)), child: Text(
-          '🏠 Melhor ponto: ${melhor.nome} (${melhor.sinal}%)' + (pior != null && pior.sinal! < 40 ? '\n⚠ Pior: ${pior.nome} (${pior.sinal}%) — considere um repetidor/mesh aqui.' : ''),
-          style: const TextStyle(color: kTxt, fontSize: 13))),
-      ])),
+      ),
     ]);
   }
+}
+
+class _HeatPainter extends CustomPainter {
+  final List<_Ponto> pts;
+  final String banda;
+  _HeatPainter(this.pts, this.banda);
+
+  int? _v(_Ponto p) => banda == '2.4' ? p.s24 : p.s5;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final medidos = pts.where((p) => _v(p) != null).toList();
+    const cell = 14.0;
+    if (medidos.isNotEmpty) {
+      for (double y = 0; y < size.height; y += cell) {
+        for (double x = 0; x < size.width; x += cell) {
+          final px = (x + cell / 2) / size.width, py = (y + cell / 2) / size.height;
+          double num = 0, den = 0;
+          for (final p in medidos) {
+            final dx = px - p.rel.dx, dy = py - p.rel.dy;
+            final d2 = dx * dx + dy * dy;
+            final w = d2 < 0.0004 ? 10000.0 : 1.0 / d2;
+            num += w * _v(p)!;
+            den += w;
+          }
+          final v = (num / den).clamp(0, 100) / 100.0;
+          final paint = Paint()..color = heatJet(v).withValues(alpha: 0.82);
+          canvas.drawRect(Rect.fromLTWH(x, y, cell + 1, cell + 1), paint);
+        }
+      }
+    }
+    // pontos medidos
+    for (final p in pts) {
+      final c = Offset(p.rel.dx * size.width, p.rel.dy * size.height);
+      final v = _v(p);
+      canvas.drawCircle(c, 7, Paint()..color = Colors.white);
+      canvas.drawCircle(c, 6, Paint()..color = v == null ? Colors.grey : heatJet(v / 100));
+      final tp = TextPainter(
+        text: TextSpan(text: v == null ? '—' : '$v', style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold)),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, c + Offset(9, -6));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _HeatPainter old) => true;
 }
 
 // ========================= VELOCIDADE (com servidores) =========================
