@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Baixar o código
         uses: actions/checkout@v4
@@ -63,3 +65,11 @@ jobs:
           name: diagnostico-rede-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+
+      - name: Publicar APK em Release (link direto pra baixar)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Última versão (APK)
+          body: APK mais recente do app Diagnóstico de Rede. Baixe o app-release.apk abaixo.
+          files: build/app/outputs/flutter-apk/app-release.apk
