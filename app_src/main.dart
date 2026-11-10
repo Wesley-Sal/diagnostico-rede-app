@@ -186,66 +186,93 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
   String _status = '';
   String _relatorio = '';
 
-  Future<String> _secStatus() async {
+  Future<String> _status0() async {
     final info = NetworkInfo();
     try {
-      final ssid = (await info.getWifiName())?.replaceAll('"', '') ?? '—';
-      final ip = await info.getWifiIP() ?? '—';
-      final mask = await info.getWifiSubmask() ?? '—';
-      final gw = await info.getWifiGatewayIP() ?? '—';
-      return 'SSID: $ssid\nIP: $ip\nMáscara: $mask\nGateway: $gw';
+      return 'SSID: ${(await info.getWifiName())?.replaceAll('"', '') ?? '—'}\n'
+          'IP: ${await info.getWifiIP() ?? '—'}\n'
+          'Máscara: ${await info.getWifiSubmask() ?? '—'}\n'
+          'Gateway: ${await info.getWifiGatewayIP() ?? '—'}\n'
+          'MAC (BSSID): ${await info.getWifiBSSID() ?? '—'}';
     } catch (e) { return 'erro: $e'; }
   }
 
-  Future<String> _secPing() async {
+  Future<(String, int?, double?)> _ping() async {
     try {
       final r = await Process.run('ping', ['-c', '4', '8.8.8.8']).timeout(const Duration(seconds: 30));
-      final out = r.stdout.toString();
+      final out = r.stdout.toString().trim();
       final tempos = RegExp(r'time=([\d.]+)').allMatches(out).map((m) => double.parse(m.group(1)!)).toList();
-      final perda = RegExp(r'(\d+)% packet loss').firstMatch(out)?.group(1) ?? '?';
-      if (tempos.isEmpty) return 'Sem resposta (perda $perda%).';
-      final media = tempos.reduce((a, b) => a + b) / tempos.length;
-      return 'Latência média: ${media.toStringAsFixed(0)} ms | perda: $perda%';
-    } catch (e) { return 'erro: $e'; }
+      final perda = int.tryParse(RegExp(r'(\d+)% packet loss').firstMatch(out)?.group(1) ?? '');
+      final media = tempos.isEmpty ? null : tempos.reduce((a, b) => a + b) / tempos.length;
+      return (out, perda, media);
+    } catch (e) { return ('erro ao executar ping: $e', null, null); }
   }
 
-  Future<String> _secCanais() async {
+  Future<String> _tracert() async {
+    for (final bin in ['traceroute', '/system/bin/traceroute']) {
+      try {
+        final r = await Process.run(bin, ['-n', '-m', '15', '8.8.8.8']).timeout(const Duration(seconds: 40));
+        final out = (r.stdout.toString() + r.stderr.toString()).trim();
+        if (out.isNotEmpty && !out.toLowerCase().contains('not found')) return out;
+      } catch (_) {}
+    }
+    return 'traceroute indisponível neste Android (geralmente exige root).';
+  }
+
+  Future<(String, String, String)> _canais() async {
     try {
       final can = await WiFiScan.instance.canStartScan();
       if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(seconds: 3)); }
       final redes = await WiFiScan.instance.getScannedResults();
-      if (redes.isEmpty) return 'nenhuma rede detectada';
-      final r24 = redes.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == '2.4');
-      final r5 = redes.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == '5');
-      double p24(int c) => r24.fold(0.0, (a, r) { final ch = canalDaFrequencia(r.frequency)!; final d = (c - ch).abs(); return a + (d == 0 ? 1.0 : (d < 5 ? (5 - d) / 5 : 0.0)) * rssiParaPorcento(r.level) / 100; });
-      final m24 = r24.isEmpty ? '—' : '${[1, 6, 11].reduce((a, b) => p24(a) <= p24(b) ? a : b)}';
-      final cand = {...r5.map((r) => canalDaFrequencia(r.frequency)!), 36, 40, 44, 48, 149, 153, 157, 161}.toList()..sort();
-      double p5(int c) => r5.fold(0.0, (a, r) { final ch = canalDaFrequencia(r.frequency)!; final d = (c - ch).abs(); return a + (ch == c ? 1.0 : (d <= 2 ? 0.3 : 0.0)) * rssiParaPorcento(r.level) / 100; });
-      final m5 = r5.isEmpty ? '—' : '${cand.reduce((a, b) => p5(a) <= p5(b) ? a : b)}';
-      return 'Redes: ${redes.length} | Melhor 2.4 GHz: $m24 | Melhor 5 GHz: $m5';
-    } catch (e) { return 'erro: $e'; }
+      if (redes.isEmpty) return ('nenhuma rede detectada', '—', '—');
+      final sb = StringBuffer('Redes encontradas: ${redes.length}');
+      String best24 = '—', best5 = '—';
+      for (final banda in ['2.4', '5']) {
+        final lista = redes.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == banda).toList();
+        if (lista.isEmpty) { sb.write('\n=== $banda GHz: nenhuma ==='); continue; }
+        sb.write('\n=== $banda GHz (${lista.length} redes) ===');
+        final porCanal = <int, int>{};
+        for (final r in lista) { final c = canalDaFrequencia(r.frequency)!; porCanal[c] = (porCanal[c] ?? 0) + 1; }
+        final canais = porCanal.keys.toList()..sort();
+        for (final c in canais) { sb.write('\n  Canal $c: ${porCanal[c]} rede(s)'); }
+        if (banda == '2.4') {
+          double p(int c) => lista.fold(0.0, (a, r) { final ch = canalDaFrequencia(r.frequency)!; final d = (c - ch).abs(); return a + (d == 0 ? 1.0 : (d < 5 ? (5 - d) / 5 : 0.0)) * rssiParaPorcento(r.level) / 100; });
+          best24 = '${[1, 6, 11].reduce((a, b) => p(a) <= p(b) ? a : b)}';
+          sb.write('\n  >>> Melhor canal: $best24');
+        } else {
+          final cand = {...lista.map((r) => canalDaFrequencia(r.frequency)!), 36, 40, 44, 48, 149, 153, 157, 161}.toList()..sort();
+          double p(int c) => lista.fold(0.0, (a, r) { final ch = canalDaFrequencia(r.frequency)!; final d = (c - ch).abs(); return a + (ch == c ? 1.0 : (d <= 2 ? 0.3 : 0.0)) * rssiParaPorcento(r.level) / 100; });
+          best5 = '${cand.reduce((a, b) => p(a) <= p(b) ? a : b)}';
+          sb.write('\n  >>> Melhor canal: $best5');
+        }
+      }
+      return (sb.toString(), best24, best5);
+    } catch (e) { return ('erro: $e', '—', '—'); }
   }
 
-  Future<String> _secDns() async {
+  Future<String> _dns() async {
     final linhas = <String>[];
     try {
       final t = DateTime.now();
       final a = await InternetAddress.lookup('google.com');
-      linhas.add('Operadora: ${DateTime.now().difference(t).inMilliseconds} ms (${a.first.address})');
-    } catch (_) { linhas.add('Operadora: falhou'); }
-    for (final p in [['Google', 'https://dns.google/resolve?name=google.com&type=A', <String, String>{}], ['Cloudflare', 'https://cloudflare-dns.com/dns-query?name=google.com&type=A', {'Accept': 'application/dns-json'}]]) {
+      final ip = a.firstWhere((x) => x.type == InternetAddressType.IPv4, orElse: () => a.first).address;
+      linhas.add('Operadora (sistema): ${DateTime.now().difference(t).inMilliseconds} ms  ->  $ip');
+    } catch (_) { linhas.add('Operadora (sistema): falhou'); }
+    for (final p in [['Google 8.8.8.8', 'https://dns.google/resolve?name=google.com&type=A', <String, String>{}], ['Cloudflare 1.1.1.1', 'https://cloudflare-dns.com/dns-query?name=google.com&type=A', {'Accept': 'application/dns-json'}]]) {
       try {
         final t = DateTime.now();
-        await http.get(Uri.parse(p[1] as String), headers: p[2] as Map<String, String>).timeout(const Duration(seconds: 8));
-        linhas.add('${p[0]}: ${DateTime.now().difference(t).inMilliseconds} ms');
+        final r = await http.get(Uri.parse(p[1] as String), headers: p[2] as Map<String, String>).timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        final ans = (d['Answer'] as List?)?.where((a) => a['type'] == 1).map((a) => a['data']).toList() ?? [];
+        linhas.add('${p[0]}: ${DateTime.now().difference(t).inMilliseconds} ms  ->  ${ans.isNotEmpty ? ans.first : "sem registro A"}');
       } catch (_) { linhas.add('${p[0]}: erro'); }
     }
     return linhas.join('\n');
   }
 
-  Future<String> _secVel() async {
+  Future<(double, double, int)> _vel() async {
     int ping = 0;
-    double down = 0;
+    double down = 0, up = 0;
     try {
       final t = DateTime.now();
       final s = await Socket.connect('speed.cloudflare.com', 443, timeout: const Duration(seconds: 4));
@@ -262,28 +289,51 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
       final seg = DateTime.now().difference(inicio).inMilliseconds / 1000.0;
       if (seg > 0) down = (total * 8) / seg / 1e6;
     } catch (_) {}
-    return 'Download: ${down.toStringAsFixed(1)} Mbps | Latência: $ping ms (servidor Cloudflare)';
+    try {
+      final payload = Uint8List(8000000);
+      final t = DateTime.now();
+      await http.post(Uri.parse('https://speed.cloudflare.com/__up'), body: payload).timeout(const Duration(seconds: 30));
+      final seg = DateTime.now().difference(t).inMilliseconds / 1000.0;
+      if (seg > 0) up = (payload.length * 8) / seg / 1e6;
+    } catch (_) {}
+    return (down, up, ping);
   }
 
   Future<void> _rodar() async {
     setState(() { _rodando = true; _relatorio = ''; });
     final sb = StringBuffer();
-    final bar = '=' * 44;
+    final bar = '=' * 46;
     sb.writeln(bar);
     sb.writeln(' RELATÓRIO DE REDE');
     sb.writeln(' Data: ${DateTime.now().toString().substring(0, 19)}');
     sb.writeln(bar);
+
     setState(() => _status = 'Coletando status...');
-    sb.writeln('\n[1] STATUS\n${await _secStatus()}');
-    setState(() => _status = 'Testando conexão (ping)...');
-    sb.writeln('\n[2] CONEXÃO\n${await _secPing()}');
+    sb.writeln('\n[1] STATUS DA REDE\n${await _status0()}');
+
+    setState(() => _status = 'Testando conexão (ping + traceroute)...');
+    final (pingTxt, perda, media) = await _ping();
+    sb.writeln('\n[2] CONEXÃO (PING)\n$pingTxt');
+    sb.writeln('\n[2b] TRACEROUTE\n${await _tracert()}');
+
     setState(() => _status = 'Escaneando canais...');
-    sb.writeln('\n[3] CANAIS WI-FI\n${await _secCanais()}');
+    final (canTxt, b24, b5) = await _canais();
+    sb.writeln('\n[3] CANAIS WI-FI\n$canTxt');
+
     setState(() => _status = 'Testando DNS...');
-    sb.writeln('\n[4] DNS\n${await _secDns()}');
+    sb.writeln('\n[4] DNS\n${await _dns()}');
+
     setState(() => _status = 'Medindo velocidade...');
-    sb.writeln('\n[5] VELOCIDADE\n${await _secVel()}');
-    sb.writeln('\n$bar');
+    final (down, up, vping) = await _vel();
+    sb.writeln('\n[5] VELOCIDADE (Cloudflare)\nDownload: ${down.toStringAsFixed(1)} Mbps | Upload: ${up.toStringAsFixed(1)} Mbps | Latência: $vping ms');
+
+    // Resumo
+    sb.writeln('\n$bar\n RESUMO');
+    sb.writeln(perda == 100 ? ' ✗ Sem resposta da internet (perda 100%).' : ' ✓ Internet respondendo${media != null ? " (latência média ${media.toStringAsFixed(0)} ms)" : ""}.');
+    sb.writeln(' • Velocidade: ~${down.toStringAsFixed(1)} Mbps down / ~${up.toStringAsFixed(1)} Mbps up.');
+    sb.writeln(' • Melhor canal 2.4 GHz: $b24 | 5 GHz: $b5.');
+    sb.writeln(bar);
+
     if (mounted) setState(() { _rodando = false; _status = 'Concluído.'; _relatorio = sb.toString(); });
   }
 
@@ -299,7 +349,7 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
       doc.addPage(pw.MultiPage(build: (c) => [
             pw.Header(level: 0, text: 'Relatório de Rede'),
             pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: _relatorio.split('\n').map((l) => pw.Text(l, style: const pw.TextStyle(fontSize: 10))).toList()),
+                children: _relatorio.split('\n').map((l) => pw.Text(l, style: const pw.TextStyle(fontSize: 9))).toList()),
           ]));
       return doc.save();
     });
@@ -308,12 +358,12 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
   @override
   Widget build(BuildContext context) {
     return ListView(children: [
-      Secao(titulo: '🔎 Teste Geral', desc: 'Roda todos os testes e gera um relatório pronto pra compartilhar ou salvar em PDF.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Secao(titulo: '🔎 Teste Geral', desc: 'Roda todos os testes e gera um relatório completo pra compartilhar (TXT) ou salvar em PDF.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         BotaoRun(_rodando ? 'Rodando...' : 'Rodar teste geral', onTap: _rodando ? null : _rodar),
         if (_status.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 10), child: Row(children: [
           if (_rodando) const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
           const SizedBox(width: 8),
-          Text(_status, style: const TextStyle(color: kMuted)),
+          Expanded(child: Text(_status, style: const TextStyle(color: kMuted))),
         ])),
         if (_relatorio.isNotEmpty) ...[
           saidaMono(_relatorio),
@@ -583,20 +633,21 @@ class _DnsScreenState extends State<DnsScreen> {
   }
 }
 
-// ========================= MAPA DE CALOR (planta + 2.4/5 + diagnóstico) =========================
-class _Ponto {
-  final Offset rel; // posição relativa (0..1) no canvas
-  int? s24;
-  int? s5;
-  _Ponto(this.rel, {this.s24, this.s5});
+// ========================= MAPA POR CÔMODOS (dBm, 2.4 e 5 GHz) =========================
+class _Comodo {
+  String nome;
+  int? r24; // dBm
+  int? r5;  // dBm
+  _Comodo(this.nome);
 }
 
-Color heatJet(double v) {
-  v = v.clamp(0.0, 1.0);
-  const cs = [Color(0xFF1E3A8A), Color(0xFF06B6D4), Color(0xFF22C55E), Color(0xFFF59E0B), Color(0xFFEF4444)];
-  final x = v * (cs.length - 1);
-  final i = x.floor().clamp(0, cs.length - 2);
-  return Color.lerp(cs[i], cs[i + 1], x - i)!;
+String qualDbm(int? d) {
+  if (d == null) return '';
+  if (d >= -55) return 'ótimo';
+  if (d >= -65) return 'bom';
+  if (d >= -72) return 'ok';
+  if (d >= -80) return 'fraco';
+  return 'ruim';
 }
 
 class MapaScreen extends StatefulWidget {
@@ -606,12 +657,11 @@ class MapaScreen extends StatefulWidget {
 }
 
 class _MapaScreenState extends State<MapaScreen> {
-  final List<_Ponto> _pts = [];
-  String _banda = '2.4';
-  bool _medindo = false;
+  final List<_Comodo> _comodos = [];
   String? _ssid;
+  bool _medindo = false;
 
-  Future<(int?, int?)> _medirBandas() async {
+  Future<(int?, int?)> _medir() async {
     try {
       final can = await WiFiScan.instance.canStartScan();
       if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(milliseconds: 600)); }
@@ -621,161 +671,106 @@ class _MapaScreenState extends State<MapaScreen> {
       if (_ssid != null && _ssid!.isNotEmpty) { final f = res.where((r) => r.ssid == _ssid); if (f.isNotEmpty) meu = f; }
       int? best(String b) {
         final g = meu.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == b);
-        return g.isEmpty ? null : rssiParaPorcento(g.map((r) => r.level).reduce(max));
+        return g.isEmpty ? null : g.map((r) => r.level).reduce(max); // dBm (max = mais forte)
       }
       return (best('2.4'), best('5'));
     } catch (_) { return (null, null); }
   }
 
-  Future<void> _tocar(Offset rel) async {
+  Future<void> _medirComodo(_Comodo c) async {
     await Permission.locationWhenInUse.request();
     setState(() => _medindo = true);
-    final (a, b) = await _medirBandas();
-    if (mounted) setState(() { _pts.add(_Ponto(rel, s24: a, s5: b)); _medindo = false; });
+    final (a, b) = await _medir();
+    if (mounted) setState(() { c.r24 = a; c.r5 = b; _medindo = false; });
   }
 
-  int? _val(_Ponto p) => _banda == '2.4' ? p.s24 : p.s5;
+  void _novo() {
+    final ctrl = TextEditingController();
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: kCard,
+      title: const Text('Novo cômodo', style: TextStyle(color: kTxt)),
+      content: TextField(controller: ctrl, autofocus: true, style: const TextStyle(color: kTxt), decoration: campoDeco('ex: Sala, Quarto, Cozinha')),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+        FilledButton(onPressed: () { final n = ctrl.text.trim(); Navigator.pop(ctx); setState(() => _comodos.add(_Comodo(n.isEmpty ? 'Cômodo ${_comodos.length + 1}' : n))); }, child: const Text('Adicionar')),
+      ],
+    ));
+  }
 
-  String _diagnostico() {
-    final vals = _pts.map(_val).whereType<int>().toList();
-    if (vals.isEmpty) return 'Meça alguns pontos (toque na planta em cada parte da casa) para o diagnóstico.';
-    final mn = vals.reduce(min), mx = vals.reduce(max);
-    final media = vals.reduce((x, y) => x + y) / vals.length;
-    final fracos = _pts.where((p) { final v = _val(p); return v != null && v < 40; }).length;
+  Widget _barraBanda(String banda, int? dbm) {
+    final pct = dbm == null ? 0 : rssiParaPorcento(dbm);
+    final cor = dbm == null ? kCard2 : corSinal(pct);
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(children: [
+        SizedBox(width: 54, child: Text('$banda GHz', style: const TextStyle(color: kMuted, fontSize: 12))),
+        Expanded(child: ClipRRect(borderRadius: BorderRadius.circular(8), child: LinearProgressIndicator(value: pct / 100, minHeight: 12, backgroundColor: kCard2, color: cor))),
+        const SizedBox(width: 8),
+        SizedBox(width: 118, child: Text(dbm == null ? '—' : '$dbm dBm ($pct%) ${qualDbm(dbm)}', textAlign: TextAlign.right, style: TextStyle(color: dbm == null ? kMuted : cor, fontSize: 11, fontWeight: FontWeight.w600))),
+      ]),
+    );
+  }
+
+  String _diag() {
+    final m24 = _comodos.where((c) => c.r24 != null).toList();
+    final m5 = _comodos.where((c) => c.r5 != null).toList();
+    if (m24.isEmpty && m5.isEmpty) return 'Cadastre os cômodos e meça o sinal em cada um para o diagnóstico.';
     final sb = StringBuffer();
-    sb.writeln('Banda $_banda GHz — pontos: ${vals.length} | média: ${media.toStringAsFixed(0)}% | pior: $mn% | melhor: $mx%');
-    if (mn < 30 || fracos >= 2) {
-      sb.writeln('\n⚠ REPETIDOR RECOMENDADO: há $fracos ponto(s) com sinal fraco (<40%). Instale um repetidor/mesh entre o roteador e a área mais fraca.');
-    } else if (mn < 50) {
-      sb.writeln('\nATENÇÃO: cobertura no limite em alguns pontos. Um repetidor pode ajudar se houver quedas nessas áreas.');
-    } else {
-      sb.writeln('\n✓ Cobertura boa nesta banda — provavelmente não precisa de repetidor.');
+    void banda(String nome, List<_Comodo> lista, int? Function(_Comodo) f) {
+      if (lista.isEmpty) return;
+      final melhor = lista.reduce((a, b) => f(a)! >= f(b)! ? a : b);
+      final piores = lista.where((c) => rssiParaPorcento(f(c)!) < 40).toList();
+      sb.writeln('$nome — melhor ponto: ${melhor.nome} (${f(melhor)} dBm).');
+      if (piores.isNotEmpty) {
+        sb.writeln('  ⚠ Repetidor recomendado: ${piores.map((c) => c.nome).join(", ")} com sinal fraco. Instale um repetidor/mesh entre o roteador e ${piores.first.nome}.');
+      } else {
+        sb.writeln('  ✓ Cobertura boa — sem necessidade aparente de repetidor.');
+      }
     }
-    if (_banda == '5') sb.writeln('Obs.: o 5 GHz é mais rápido porém alcança menos. Quedas longe do roteador são normais — o 2.4 GHz cobre melhor as áreas distantes.');
-    return sb.toString();
+    banda('2.4 GHz', m24, (c) => c.r24);
+    banda('5 GHz', m5, (c) => c.r5);
+    if (m5.isNotEmpty) sb.writeln('Obs.: o 5 GHz alcança menos que o 2.4; é normal cair mais rápido longe do roteador.');
+    return sb.toString().trim();
   }
 
   @override
   Widget build(BuildContext context) {
     return ListView(children: [
       Secao(
-        titulo: '📍 Mapa de Calor do Wi-Fi',
-        desc: 'Ande pela casa e toque na planta no ponto onde você está — o app mede o sinal ali e pinta o mapa de calor (vermelho = forte, azul = fraco). Mede 2.4 e 5 GHz.',
+        titulo: '📍 Mapa de Sinal por Cômodo',
+        desc: 'Cadastre os cômodos da casa e meça o sinal em cada um. Mostra a potência em dBm (e %) no 2.4 e 5 GHz, e aponta onde pega melhor e se precisa de repetidor.',
         filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          // Alternância de banda
-          Row(children: ['2.4', '5'].map((b) {
-            final sel = _banda == b;
-            return Expanded(child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: GestureDetector(
-                onTap: () => setState(() => _banda = b),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    gradient: sel ? const LinearGradient(colors: [kAccent, kAccent2]) : null,
-                    color: sel ? null : kCard2,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text('$b GHz', style: TextStyle(color: sel ? const Color(0xFF041320) : kMuted, fontWeight: FontWeight.w700)),
-                ),
-              ),
-            ));
-          }).toList()),
-          const SizedBox(height: 12),
-          // Canvas do mapa de calor
-          LayoutBuilder(builder: (ctx, cons) {
-            final w = cons.maxWidth, h = 340.0;
-            return GestureDetector(
-              onTapDown: (d) => _tocar(Offset(d.localPosition.dx / w, d.localPosition.dy / h)),
-              child: Container(
-                width: w, height: h,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF0A1020),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: kLine),
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: CustomPaint(size: Size(w, h), painter: _HeatPainter(_pts, _banda)),
-              ),
-            );
-          }),
-          const SizedBox(height: 8),
-          // Legenda
-          Row(children: [
-            const Text('fraco', style: TextStyle(color: kMuted, fontSize: 11)),
-            const SizedBox(width: 6),
-            Expanded(child: Container(height: 10, decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(999),
-              gradient: const LinearGradient(colors: [Color(0xFF1E3A8A), Color(0xFF06B6D4), Color(0xFF22C55E), Color(0xFFF59E0B), Color(0xFFEF4444)]),
-            ))),
-            const SizedBox(width: 6),
-            const Text('forte', style: TextStyle(color: kMuted, fontSize: 11)),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text(_medindo ? 'medindo...' : '${_comodos.length} cômodo(s)', style: const TextStyle(color: kMuted, fontSize: 13)),
+            TextButton.icon(onPressed: _novo, icon: const Icon(Icons.add, size: 18), label: const Text('Cômodo')),
           ]),
-          const SizedBox(height: 10),
-          Row(children: [
-            Expanded(child: Text(_medindo ? 'medindo ponto...' : '${_pts.length} ponto(s) marcado(s)', style: const TextStyle(color: kMuted, fontSize: 12))),
-            TextButton.icon(onPressed: _pts.isEmpty ? null : () => setState(() => _pts.clear()), icon: const Icon(Icons.delete_outline, size: 18), label: const Text('Limpar')),
-          ]),
-          Container(
-            margin: const EdgeInsets.only(top: 6),
+          if (_comodos.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Nenhum cômodo. Toque em "Cômodo", vá até o local e meça.', style: TextStyle(color: kMuted, fontSize: 13))),
+          ..._comodos.map((c) => Container(
+                margin: const EdgeInsets.symmetric(vertical: 6),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(12)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Expanded(child: Text(c.nome, style: const TextStyle(fontWeight: FontWeight.w700, color: kTxt))),
+                    TextButton(onPressed: () => _medirComodo(c), child: const Text('Medir aqui')),
+                    IconButton(onPressed: () => setState(() => _comodos.remove(c)), icon: const Icon(Icons.close, color: kMuted, size: 18)),
+                  ]),
+                  _barraBanda('2.4', c.r24),
+                  _barraBanda('5', c.r5),
+                ]),
+              )),
+          if (_comodos.any((c) => c.r24 != null || c.r5 != null)) Container(
+            margin: const EdgeInsets.only(top: 10),
             padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)),
-            child: Text(_diagnostico(), style: const TextStyle(color: kTxt, fontSize: 13)),
+            decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(10), border: Border.all(color: kLine)),
+            child: Text(_diag(), style: const TextStyle(color: kTxt, fontSize: 13)),
           ),
           const SizedBox(height: 8),
-          const Text('Dica: marque pontos em cada cômodo (sala, quartos, cozinha, garagem). Quanto mais pontos, mais preciso o mapa.', style: TextStyle(color: kMuted, fontSize: 11)),
+          const Text('Como usar: adicione um cômodo, vá fisicamente até ele e toque em "Medir aqui". Repita em cada parte da casa.', style: TextStyle(color: kMuted, fontSize: 11)),
         ]),
       ),
     ]);
   }
-}
-
-class _HeatPainter extends CustomPainter {
-  final List<_Ponto> pts;
-  final String banda;
-  _HeatPainter(this.pts, this.banda);
-
-  int? _v(_Ponto p) => banda == '2.4' ? p.s24 : p.s5;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final medidos = pts.where((p) => _v(p) != null).toList();
-    const cell = 14.0;
-    if (medidos.isNotEmpty) {
-      for (double y = 0; y < size.height; y += cell) {
-        for (double x = 0; x < size.width; x += cell) {
-          final px = (x + cell / 2) / size.width, py = (y + cell / 2) / size.height;
-          double num = 0, den = 0;
-          for (final p in medidos) {
-            final dx = px - p.rel.dx, dy = py - p.rel.dy;
-            final d2 = dx * dx + dy * dy;
-            final w = d2 < 0.0004 ? 10000.0 : 1.0 / d2;
-            num += w * _v(p)!;
-            den += w;
-          }
-          final v = (num / den).clamp(0, 100) / 100.0;
-          final paint = Paint()..color = heatJet(v).withValues(alpha: 0.82);
-          canvas.drawRect(Rect.fromLTWH(x, y, cell + 1, cell + 1), paint);
-        }
-      }
-    }
-    // pontos medidos
-    for (final p in pts) {
-      final c = Offset(p.rel.dx * size.width, p.rel.dy * size.height);
-      final v = _v(p);
-      canvas.drawCircle(c, 7, Paint()..color = Colors.white);
-      canvas.drawCircle(c, 6, Paint()..color = v == null ? Colors.grey : heatJet(v / 100));
-      final tp = TextPainter(
-        text: TextSpan(text: v == null ? '—' : '$v', style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold)),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, c + Offset(9, -6));
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _HeatPainter old) => true;
 }
 
 // ========================= VELOCIDADE (com servidores) =========================
