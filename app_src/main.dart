@@ -14,6 +14,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:printing/printing.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() => runApp(const DiagApp());
 
@@ -118,59 +120,100 @@ Widget saidaMono(String texto) => Container(
       child: Text(texto, style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: Color(0xFFB8C4E0))),
     );
 
-class HomePage extends StatefulWidget {
-  const HomePage({super.key});
-  @override
-  State<HomePage> createState() => _HomePageState();
+class MenuItem {
+  final IconData icon;
+  final Color cor;
+  final String label;
+  final Widget tela;
+  const MenuItem(this.icon, this.cor, this.label, this.tela);
 }
 
-class _HomePageState extends State<HomePage> {
-  int _idx = 0;
-  final _abas = const ['🔎 Geral', '📋 Status', '📶 Canais', '🔌 Conexão', '🌐 DNS', '📍 Mapa', '⚡ Velocidade', '📡 Rede', '📈 Estável', '🎮 Qualidade', '🔐 Senha'];
-  final _pages = const [TesteGeralScreen(), StatusScreen(), CanaisScreen(), ConexaoScreen(), DnsScreen(), MapaScreen(), VelocidadeScreen(), DispositivosScreen(), EstabilidadeScreen(), QualidadeScreen(), SenhaScreen()];
+class HomePage extends StatelessWidget {
+  const HomePage({super.key});
+
+  static const itens = [
+    MenuItem(Icons.search, kAccent, 'Teste Geral', TesteGeralScreen()),
+    MenuItem(Icons.info_outline, Color(0xFF60A5FA), 'Status', StatusScreen()),
+    MenuItem(Icons.wifi, Color(0xFF22C55E), 'Canais', CanaisScreen()),
+    MenuItem(Icons.network_ping, Color(0xFFF59E0B), 'Conexão', ConexaoScreen()),
+    MenuItem(Icons.dns, Color(0xFF8B5CF6), 'DNS', DnsScreen()),
+    MenuItem(Icons.map, Color(0xFFEF4444), 'Mapa de Sinal', MapaScreen()),
+    MenuItem(Icons.speed, kAccent2, 'Velocidade', VelocidadeScreen()),
+    MenuItem(Icons.devices, Color(0xFF06B6D4), 'Dispositivos', DispositivosScreen()),
+    MenuItem(Icons.show_chart, Color(0xFF22C55E), 'Estabilidade', EstabilidadeScreen()),
+    MenuItem(Icons.sports_esports, Color(0xFFEC4899), 'Qualidade', QualidadeScreen()),
+    MenuItem(Icons.qr_code_2, Color(0xFF60A5FA), 'QR Wi-Fi', QrWifiScreen()),
+    MenuItem(Icons.router, Color(0xFFF59E0B), 'Roteador', RoteadorScreen()),
+    MenuItem(Icons.lock_outline, Color(0xFF8B5CF6), 'Senha', SenhaScreen()),
+  ];
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Column(children: [
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 2),
+            padding: const EdgeInsets.fromLTRB(18, 16, 18, 4),
             child: Row(children: const [
-              Text('🛜', style: TextStyle(fontSize: 24)),
+              Text('🛜', style: TextStyle(fontSize: 26)),
               SizedBox(width: 8),
-              Text('Diagnóstico de Rede', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kTxt)),
+              Text('Diagnóstico de Rede', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800, color: kTxt)),
             ]),
           ),
-          SizedBox(
-            height: 52,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              itemCount: _abas.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 6),
-              itemBuilder: (c, i) {
-                final sel = i == _idx;
-                return GestureDetector(
-                  onTap: () => setState(() => _idx = i),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 150),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      gradient: sel ? const LinearGradient(colors: [kAccent, kAccent2]) : null,
-                      color: sel ? null : kCard,
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(color: sel ? Colors.transparent : kLine),
-                    ),
-                    child: Text(_abas[i], style: TextStyle(color: sel ? const Color(0xFF041320) : kMuted, fontWeight: FontWeight.w600, fontSize: 13)),
-                  ),
-                );
-              },
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 0, 20, 10),
+            child: Text('Toque em um teste para começar', style: TextStyle(color: kMuted, fontSize: 13)),
+          ),
+          Expanded(
+            child: GridView.count(
+              crossAxisCount: 3,
+              padding: const EdgeInsets.all(14),
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              children: itens.map((m) => _MenuCard(m)).toList(),
             ),
           ),
-          Expanded(child: IndexedStack(index: _idx, children: _pages)),
         ]),
       ),
+    );
+  }
+}
+
+class _MenuCard extends StatelessWidget {
+  final MenuItem m;
+  const _MenuCard(this.m);
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => _Pagina(titulo: m.label, child: m.tela))),
+      child: Container(
+        decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(16), border: Border.all(color: kLine)),
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Container(
+            width: 50, height: 50,
+            decoration: BoxDecoration(color: m.cor.withValues(alpha: .16), borderRadius: BorderRadius.circular(14)),
+            child: Icon(m.icon, color: m.cor, size: 26),
+          ),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(m.label, textAlign: TextAlign.center, maxLines: 2, style: const TextStyle(color: kTxt, fontSize: 12, fontWeight: FontWeight.w600)),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+class _Pagina extends StatelessWidget {
+  final String titulo;
+  final Widget child;
+  const _Pagina({required this.titulo, required this.child});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(titulo), backgroundColor: kCard, foregroundColor: kTxt),
+      body: child,
     );
   }
 }
@@ -185,6 +228,8 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
   bool _rodando = false;
   String _status = '';
   String _relatorio = '';
+  final _cliente = TextEditingController();
+  final _protocolo = TextEditingController();
 
   Future<String> _status0() async {
     final info = NetworkInfo();
@@ -306,6 +351,8 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
     sb.writeln(bar);
     sb.writeln(' RELATÓRIO DE REDE');
     sb.writeln(' Data: ${DateTime.now().toString().substring(0, 19)}');
+    if (_cliente.text.trim().isNotEmpty) sb.writeln(' Cliente: ${_cliente.text.trim()}');
+    if (_protocolo.text.trim().isNotEmpty) sb.writeln(' Protocolo: ${_protocolo.text.trim()}');
     sb.writeln(bar);
 
     setState(() => _status = 'Coletando status...');
@@ -342,6 +389,12 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
     await Share.share(_relatorio, subject: 'Relatório de Rede');
   }
 
+  Future<void> _whatsapp() async {
+    if (_relatorio.isEmpty) return;
+    final uri = Uri.parse('https://wa.me/?text=${Uri.encodeComponent(_relatorio)}');
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
   Future<void> _gerarPdf() async {
     if (_relatorio.isEmpty) return;
     await Printing.layoutPdf(onLayout: (format) async {
@@ -358,7 +411,11 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
   @override
   Widget build(BuildContext context) {
     return ListView(children: [
-      Secao(titulo: '🔎 Teste Geral', desc: 'Roda todos os testes e gera um relatório completo pra compartilhar (TXT) ou salvar em PDF.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Secao(titulo: '🔎 Teste Geral', desc: 'Roda todos os testes e gera um relatório completo pra compartilhar (TXT/WhatsApp) ou salvar em PDF.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        TextField(controller: _cliente, style: const TextStyle(color: kTxt), decoration: campoDeco('Cliente (opcional)')),
+        const SizedBox(height: 8),
+        TextField(controller: _protocolo, style: const TextStyle(color: kTxt), decoration: campoDeco('Protocolo / chamado (opcional)')),
+        const SizedBox(height: 12),
         BotaoRun(_rodando ? 'Rodando...' : 'Rodar teste geral', onTap: _rodando ? null : _rodar),
         if (_status.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 10), child: Row(children: [
           if (_rodando) const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
@@ -369,9 +426,11 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
           saidaMono(_relatorio),
           const SizedBox(height: 12),
           Row(children: [
-            Expanded(child: BotaoRun('Compartilhar TXT', cor: kOk, onTap: _compartilharTxt)),
-            const SizedBox(width: 10),
-            Expanded(child: BotaoRun('Gerar PDF', cor: kBad, onTap: _gerarPdf)),
+            Expanded(child: BotaoRun('WhatsApp', cor: const Color(0xFF25D366), onTap: _whatsapp)),
+            const SizedBox(width: 8),
+            Expanded(child: BotaoRun('TXT', cor: kOk, onTap: _compartilharTxt)),
+            const SizedBox(width: 8),
+            Expanded(child: BotaoRun('PDF', cor: kBad, onTap: _gerarPdf)),
           ]),
         ],
       ])),
@@ -1171,6 +1230,93 @@ class _QualidadeScreenState extends State<QualidadeScreen> {
         Text(_status, style: const TextStyle(color: kMuted, fontSize: 13)),
         if (_jogos.isNotEmpty) ...[const SizedBox(height: 12), const Text('🎮 Jogos', style: TextStyle(fontWeight: FontWeight.bold, color: kTxt)), Padding(padding: const EdgeInsets.only(top: 4), child: Text(_jogos, style: const TextStyle(color: kMuted)))],
         if (_streaming.isNotEmpty) ...[const SizedBox(height: 12), const Text('📺 Streaming', style: TextStyle(fontWeight: FontWeight.bold, color: kTxt)), Padding(padding: const EdgeInsets.only(top: 4), child: Text(_streaming, style: const TextStyle(color: kMuted)))],
+      ])),
+    ]);
+  }
+}
+
+
+// ========================= QR CODE DO WI-FI =========================
+class QrWifiScreen extends StatefulWidget {
+  const QrWifiScreen({super.key});
+  @override
+  State<QrWifiScreen> createState() => _QrWifiScreenState();
+}
+class _QrWifiScreenState extends State<QrWifiScreen> {
+  final _ssid = TextEditingController();
+  final _senha = TextEditingController();
+  String _seg = 'WPA';
+  @override
+  void initState() {
+    super.initState();
+    NetworkInfo().getWifiName().then((v) { if (v != null && mounted) setState(() => _ssid.text = v.replaceAll('"', '')); });
+  }
+  String get _payload {
+    final t = _seg == 'nopass' ? 'nopass' : _seg;
+    String esc(String s) => s.replaceAll(r'\', r'\\').replaceAll(';', r'\;').replaceAll(',', r'\,').replaceAll(':', r'\:');
+    return 'WIFI:T:$t;S:${esc(_ssid.text)};P:${esc(_senha.text)};;';
+  }
+  @override
+  Widget build(BuildContext context) {
+    final valido = _ssid.text.trim().isNotEmpty;
+    return ListView(children: [
+      Secao(titulo: '📷 QR Code do Wi-Fi', desc: 'Gere um QR Code para o cliente conectar apontando a câmera. (A senha você digita — o Android não deixa o app ler a senha salva.)', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        TextField(controller: _ssid, onChanged: (_) => setState(() {}), style: const TextStyle(color: kTxt), decoration: campoDeco('Nome da rede (SSID)')),
+        const SizedBox(height: 10),
+        TextField(controller: _senha, onChanged: (_) => setState(() {}), style: const TextStyle(color: kTxt), decoration: campoDeco('Senha')),
+        const SizedBox(height: 10),
+        DropdownButtonFormField<String>(
+          value: _seg, dropdownColor: kCard, decoration: campoDeco(''),
+          items: const [
+            DropdownMenuItem(value: 'WPA', child: Text('WPA/WPA2/WPA3', style: TextStyle(color: kTxt))),
+            DropdownMenuItem(value: 'WEP', child: Text('WEP', style: TextStyle(color: kTxt))),
+            DropdownMenuItem(value: 'nopass', child: Text('Aberta (sem senha)', style: TextStyle(color: kTxt))),
+          ],
+          onChanged: (v) => setState(() => _seg = v ?? 'WPA'),
+        ),
+        const SizedBox(height: 18),
+        if (valido) Center(child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+          child: QrImageView(data: _payload, size: 220, backgroundColor: Colors.white),
+        )) else const Center(child: Text('Informe o nome da rede para gerar o QR.', style: TextStyle(color: kMuted))),
+      ])),
+    ]);
+  }
+}
+
+// ========================= ATALHO PRO ROTEADOR =========================
+class RoteadorScreen extends StatefulWidget {
+  const RoteadorScreen({super.key});
+  @override
+  State<RoteadorScreen> createState() => _RoteadorScreenState();
+}
+class _RoteadorScreenState extends State<RoteadorScreen> {
+  String? _gw;
+  @override
+  void initState() {
+    super.initState();
+    NetworkInfo().getWifiGatewayIP().then((v) { if (mounted) setState(() => _gw = v); });
+  }
+  Future<void> _abrir() async {
+    if (_gw == null) return;
+    final uri = Uri.parse('http://$_gw');
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Não foi possível abrir o navegador.')));
+    }
+  }
+  @override
+  Widget build(BuildContext context) {
+    return ListView(children: [
+      Secao(titulo: '🖥️ Painel do Roteador', desc: 'Abre a página de configuração do roteador no navegador.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Container(padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)), child: Row(children: [
+          const Text('Gateway: ', style: TextStyle(color: kMuted)),
+          Text(_gw ?? '—', style: const TextStyle(color: kTxt, fontWeight: FontWeight.w700)),
+        ])),
+        const SizedBox(height: 14),
+        BotaoRun('Abrir painel do roteador', onTap: _gw == null ? null : _abrir),
+        const SizedBox(height: 14),
+        const Text('Dicas de acesso comuns:\n• Usuário/senha costumam ser admin/admin ou estão na etiqueta do roteador.\n• Se não abrir, digite o IP do gateway direto no navegador.', style: TextStyle(color: kMuted, fontSize: 12)),
       ])),
     ]);
   }
