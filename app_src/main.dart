@@ -126,8 +126,8 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   int _idx = 0;
-  final _abas = const ['🔎 Geral', '📋 Status', '📶 Canais', '🔌 Conexão', '🌐 DNS', '📍 Mapa', '⚡ Velocidade', '🔐 Senha'];
-  final _pages = const [TesteGeralScreen(), StatusScreen(), CanaisScreen(), ConexaoScreen(), DnsScreen(), MapaScreen(), VelocidadeScreen(), SenhaScreen()];
+  final _abas = const ['🔎 Geral', '📋 Status', '📶 Canais', '🔌 Conexão', '🌐 DNS', '📍 Mapa', '⚡ Velocidade', '📡 Rede', '📈 Estável', '🎮 Qualidade', '🔐 Senha'];
+  final _pages = const [TesteGeralScreen(), StatusScreen(), CanaisScreen(), ConexaoScreen(), DnsScreen(), MapaScreen(), VelocidadeScreen(), DispositivosScreen(), EstabilidadeScreen(), QualidadeScreen(), SenhaScreen()];
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -400,6 +400,15 @@ class _StatusScreenState extends State<StatusScreen> {
         'Gateway': await info.getWifiGatewayIP(),
         'MAC (BSSID)': await info.getWifiBSSID(),
       };
+      // Segurança (WPA2/WPA3/aberta) via scan
+      try {
+        final can = await WiFiScan.instance.canStartScan();
+        if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(seconds: 2)); }
+        final res = await WiFiScan.instance.getScannedResults();
+        final bssid = _d['MAC (BSSID)']?.toLowerCase();
+        final me = res.where((r) => r.bssid.toLowerCase() == bssid);
+        _d['Segurança'] = me.isNotEmpty ? segDaCapabilities(me.first.capabilities) : '—';
+      } catch (_) { _d['Segurança'] = '—'; }
     } catch (e) { _d = {'Erro': '$e'}; }
     if (mounted) setState(() => _c = false);
   }
@@ -919,6 +928,254 @@ class _GaugePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _GaugePainter old) => old.frac != frac || old.cor != cor;
 }
+
+// ========================= DISPOSITIVOS NA REDE =========================
+String segDaCapabilities(String c) {
+  final u = c.toUpperCase();
+  if (u.contains('WPA3') || u.contains('SAE')) return 'WPA3';
+  if (u.contains('RSN') || u.contains('WPA2')) return 'WPA2';
+  if (u.contains('WPA')) return 'WPA';
+  if (u.contains('WEP')) return 'WEP';
+  return 'Aberta';
+}
+
+class DispositivosScreen extends StatefulWidget {
+  const DispositivosScreen({super.key});
+  @override
+  State<DispositivosScreen> createState() => _DispositivosScreenState();
+}
+class _DispositivosScreenState extends State<DispositivosScreen> {
+  bool _scan = false;
+  String _status = 'Toque para escanear a rede e ver quem está conectado.';
+  List<Map<String, String>> _devs = [];
+
+  int _ipNum(String ip) { final p = ip.split('.'); return p.length == 4 ? (int.tryParse(p[3]) ?? 0) : 0; }
+
+  Future<void> _escanear() async {
+    setState(() { _scan = true; _devs = []; _status = 'Preparando...'; });
+    final info = NetworkInfo();
+    final ip = await info.getWifiIP();
+    final gw = await info.getWifiGatewayIP();
+    if (ip == null || !ip.contains('.')) { setState(() { _scan = false; _status = 'Sem IP — conecte ao Wi-Fi.'; }); return; }
+    final base = ip.split('.').take(3).join('.');
+    final alvos = [for (int i = 1; i <= 254; i++) '$base.$i'];
+    final vivos = <String>{};
+    const chunk = 25;
+    for (int i = 0; i < alvos.length; i += chunk) {
+      final part = alvos.skip(i).take(chunk).toList();
+      final res = await Future.wait(part.map((x) async {
+        try { final r = await Process.run('ping', ['-c', '1', '-W', '1', x]).timeout(const Duration(seconds: 3)); return r.exitCode == 0 ? x : null; } catch (_) { return null; }
+      }));
+      vivos.addAll(res.whereType<String>());
+      if (mounted) setState(() => _status = 'Escaneando... ${(i + chunk).clamp(0, 254)}/254');
+    }
+    final macs = <String, String>{};
+    try {
+      final arp = await File('/proc/net/arp').readAsString();
+      for (final l in arp.split('\n').skip(1)) {
+        final p = l.trim().split(RegExp(r'\s+'));
+        if (p.length >= 4 && p[2] == '0x2' && p[3] != '00:00:00:00:00:00') { macs[p[0]] = p[3]; vivos.add(p[0]); }
+      }
+    } catch (_) {}
+    final lista = <Map<String, String>>[{'ip': ip, 'mac': '(este aparelho)', 'tag': 'você'}];
+    final ordenados = vivos.toList()..sort((a, b) => _ipNum(a).compareTo(_ipNum(b)));
+    for (final v in ordenados) {
+      if (v == ip) continue;
+      lista.add({'ip': v, 'mac': macs[v] ?? '—', 'tag': v == gw ? 'roteador' : ''});
+    }
+    if (mounted) setState(() { _scan = false; _devs = lista; _status = '${lista.length} dispositivo(s) na rede.'; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(children: [
+      Secao(titulo: '📡 Dispositivos na Rede', desc: 'Varre a rede local e lista os aparelhos conectados (IP e MAC). Útil pra achar intrusos ou explicar lentidão por excesso de aparelhos.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        BotaoRun(_scan ? 'Escaneando...' : 'Escanear rede', onTap: _scan ? null : _escanear),
+        const SizedBox(height: 10),
+        Text(_status, style: const TextStyle(color: kMuted, fontSize: 13)),
+        const SizedBox(height: 6),
+        ..._devs.map((d) => Container(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)),
+              child: Row(children: [
+                Icon(d['tag'] == 'roteador' ? Icons.router : (d['tag'] == 'você' ? Icons.smartphone : Icons.devices), color: kAccent, size: 20),
+                const SizedBox(width: 10),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(d['ip']!, style: const TextStyle(fontWeight: FontWeight.w700, color: kTxt)),
+                  Text(d['mac']!, style: const TextStyle(color: kMuted, fontSize: 12)),
+                ])),
+                if ((d['tag'] ?? '').isNotEmpty) Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3), decoration: BoxDecoration(color: kAccent.withValues(alpha: .18), borderRadius: BorderRadius.circular(999)), child: Text(d['tag']!, style: const TextStyle(color: kAccent, fontSize: 11, fontWeight: FontWeight.w600))),
+              ]),
+            )),
+        if (!_scan && _devs.isNotEmpty) const Padding(padding: EdgeInsets.only(top: 8), child: Text('Obs.: em alguns Android o MAC pode não aparecer (restrição do sistema) — o IP e a contagem continuam valendo.', style: TextStyle(color: kMuted, fontSize: 11))),
+      ])),
+    ]);
+  }
+}
+
+// ========================= ESTABILIDADE (ping contínuo + gráfico) =========================
+class EstabilidadeScreen extends StatefulWidget {
+  const EstabilidadeScreen({super.key});
+  @override
+  State<EstabilidadeScreen> createState() => _EstabilidadeScreenState();
+}
+class _EstabilidadeScreenState extends State<EstabilidadeScreen> {
+  final _host = TextEditingController(text: '8.8.8.8');
+  final List<double?> _amostras = [];
+  bool _rodando = false;
+  Timer? _timer;
+  int _env = 0, _perd = 0;
+
+  void _iniciar() {
+    setState(() { _rodando = true; _amostras.clear(); _env = 0; _perd = 0; });
+    _timer = Timer.periodic(const Duration(milliseconds: 1200), (_) => _umPing());
+  }
+  void _parar() { _timer?.cancel(); setState(() => _rodando = false); }
+  Future<void> _umPing() async {
+    _env++;
+    double? ms;
+    try {
+      final r = await Process.run('ping', ['-c', '1', '-W', '2', _host.text.trim()]).timeout(const Duration(seconds: 4));
+      final m = RegExp(r'time=([\d.]+)').firstMatch(r.stdout.toString());
+      if (m != null) ms = double.parse(m.group(1)!);
+    } catch (_) {}
+    if (ms == null) _perd++;
+    if (mounted) setState(() { _amostras.add(ms); if (_amostras.length > 60) _amostras.removeAt(0); });
+  }
+  @override
+  void dispose() { _timer?.cancel(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final validas = _amostras.whereType<double>().toList();
+    final mn = validas.isEmpty ? 0 : validas.reduce(min);
+    final mx = validas.isEmpty ? 0 : validas.reduce(max);
+    final avg = validas.isEmpty ? 0 : validas.reduce((a, b) => a + b) / validas.length;
+    final jit = (mx - mn).toDouble();
+    final perdaPct = _env == 0 ? 0 : (_perd * 100 / _env);
+    return ListView(children: [
+      Secao(titulo: '📈 Estabilidade', desc: 'Ping contínuo com gráfico ao vivo. Deixe rodando para flagrar picos e quedas da conexão.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        TextField(controller: _host, style: const TextStyle(color: kTxt), decoration: campoDeco('destino (ex: 8.8.8.8)')),
+        const SizedBox(height: 12),
+        Container(
+          height: 150,
+          decoration: BoxDecoration(color: const Color(0xFF080D1A), borderRadius: BorderRadius.circular(12), border: Border.all(color: kLine)),
+          clipBehavior: Clip.antiAlias,
+          child: CustomPaint(painter: _LatChart(_amostras), child: const SizedBox.expand()),
+        ),
+        const SizedBox(height: 10),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
+          _stat('${avg.toStringAsFixed(0)}', 'média ms'),
+          _stat('${mx.toStringAsFixed(0)}', 'máx ms'),
+          _stat('${jit.toStringAsFixed(0)}', 'jitter ms'),
+          _stat('${perdaPct.toStringAsFixed(0)}%', 'perda'),
+        ]),
+        const SizedBox(height: 12),
+        BotaoRun(_rodando ? 'Parar' : 'Iniciar', cor: _rodando ? kBad : kOk, onTap: _rodando ? _parar : _iniciar),
+      ])),
+    ]);
+  }
+  Widget _stat(String v, String l) => Column(children: [
+        Text(v, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kAccent)),
+        Text(l, style: const TextStyle(fontSize: 10, color: kMuted)),
+      ]);
+}
+class _LatChart extends CustomPainter {
+  final List<double?> dados;
+  _LatChart(this.dados);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final validas = dados.whereType<double>().toList();
+    if (validas.isEmpty) return;
+    final mx = max(validas.reduce(max), 20.0);
+    final n = dados.length;
+    final dx = n <= 1 ? size.width : size.width / (n - 1);
+    final linha = Paint()..color = kAccent..strokeWidth = 2..style = PaintingStyle.stroke;
+    Path? path;
+    for (int i = 0; i < n; i++) {
+      final v = dados[i];
+      if (v == null) {
+        if (path != null) { canvas.drawPath(path, linha); path = null; }
+        final x = i * dx;
+        canvas.drawCircle(Offset(x, size.height - 6), 3, Paint()..color = kBad);
+        continue;
+      }
+      final x = i * dx;
+      final y = size.height - (v / mx) * (size.height - 12) - 6;
+      if (path == null) { path = Path()..moveTo(x, y); } else { path.lineTo(x, y); }
+    }
+    if (path != null) canvas.drawPath(path, linha);
+  }
+  @override
+  bool shouldRepaint(covariant _LatChart old) => true;
+}
+
+// ========================= QUALIDADE (jogos + streaming) =========================
+class QualidadeScreen extends StatefulWidget {
+  const QualidadeScreen({super.key});
+  @override
+  State<QualidadeScreen> createState() => _QualidadeScreenState();
+}
+class _QualidadeScreenState extends State<QualidadeScreen> {
+  bool _rodando = false;
+  String _jogos = '', _streaming = '', _status = 'Toque para testar.';
+
+  Future<int> _lat(String host, int port) async {
+    try { final t = DateTime.now(); final s = await Socket.connect(host, port, timeout: const Duration(seconds: 4)); s.destroy(); return DateTime.now().difference(t).inMilliseconds; } catch (_) { return -1; }
+  }
+
+  Future<void> _testar() async {
+    setState(() { _rodando = true; _jogos = ''; _streaming = ''; _status = 'Testando latência (jogos)...'; });
+    // jogos: latência a vários servidores, 3 medições cada
+    final hosts = {'Cloudflare': 'speed.cloudflare.com', 'Google': 'google.com', 'AWS': 'aws.amazon.com'};
+    final medias = <int>[];
+    for (final h in hosts.values) {
+      final ms = <int>[];
+      for (int i = 0; i < 3; i++) { final v = await _lat(h, 443); if (v >= 0) ms.add(v); }
+      if (ms.isNotEmpty) medias.add(ms.reduce((a, b) => a + b) ~/ ms.length);
+    }
+    if (medias.isNotEmpty) {
+      final avg = medias.reduce((a, b) => a + b) ~/ medias.length;
+      final jit = medias.reduce(max) - medias.reduce(min);
+      final nota = avg < 40 ? 'A (excelente)' : avg < 80 ? 'B (bom)' : avg < 150 ? 'C (jogável)' : 'D (ruim)';
+      _jogos = 'Latência média: $avg ms | jitter: $jit ms\nNota para jogos online: $nota';
+    } else { _jogos = 'Não foi possível medir.'; }
+
+    setState(() => _status = 'Testando capacidade (streaming)...');
+    double mbps = 0;
+    try {
+      final client = http.Client();
+      final resp = await client.send(http.Request('GET', Uri.parse('https://speed.cloudflare.com/__down?bytes=15000000')));
+      final inicio = DateTime.now();
+      int total = 0;
+      await for (final c in resp.stream) { total += c.length; if (total >= 12000000 || DateTime.now().difference(inicio).inSeconds >= 10) break; }
+      client.close();
+      final seg = DateTime.now().difference(inicio).inMilliseconds / 1000.0;
+      if (seg > 0) mbps = (total * 8) / seg / 1e6;
+    } catch (_) {}
+    String ok(double need) => mbps >= need ? '✓' : '✗';
+    _streaming = 'Download medido: ${mbps.toStringAsFixed(1)} Mbps\n'
+        '${ok(3)} SD (3 Mbps)   ${ok(5)} HD 720p (5 Mbps)\n'
+        '${ok(8)} Full HD 1080p (8 Mbps)   ${ok(25)} 4K (25 Mbps)';
+
+    if (mounted) setState(() { _rodando = false; _status = 'Concluído.'; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(children: [
+      Secao(titulo: '🎮 Qualidade (Jogos & Streaming)', desc: 'Mede se a conexão é boa para jogos online e qual qualidade de vídeo ela aguenta.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        BotaoRun(_rodando ? 'Testando...' : 'Testar', onTap: _rodando ? null : _testar),
+        const SizedBox(height: 10),
+        Text(_status, style: const TextStyle(color: kMuted, fontSize: 13)),
+        if (_jogos.isNotEmpty) ...[const SizedBox(height: 12), const Text('🎮 Jogos', style: TextStyle(fontWeight: FontWeight.bold, color: kTxt)), Padding(padding: const EdgeInsets.only(top: 4), child: Text(_jogos, style: const TextStyle(color: kMuted)))],
+        if (_streaming.isNotEmpty) ...[const SizedBox(height: 12), const Text('📺 Streaming', style: TextStyle(fontWeight: FontWeight.bold, color: kTxt)), Padding(padding: const EdgeInsets.only(top: 4), child: Text(_streaming, style: const TextStyle(color: kMuted)))],
+      ])),
+    ]);
+  }
+}
+
 
 // ========================= SENHA =========================
 class SenhaScreen extends StatefulWidget {
