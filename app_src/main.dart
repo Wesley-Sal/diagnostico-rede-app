@@ -18,6 +18,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 
 void main() => runApp(const DiagApp());
 
@@ -146,6 +147,7 @@ class HomePage extends StatelessWidget {
     MenuItem(Icons.sports_esports, Color(0xFFEC4899), 'Qualidade', QualidadeScreen()),
     MenuItem(Icons.qr_code_2, Color(0xFF60A5FA), 'QR Wi-Fi', QrWifiScreen()),
     MenuItem(Icons.router, Color(0xFFF59E0B), 'Roteador', RoteadorScreen()),
+    MenuItem(Icons.directions_walk, Color(0xFF22C55E), 'Caminhada', CaminhadaScreen()),
     MenuItem(Icons.map_outlined, Color(0xFFEF4444), 'Planta', PlantaScreen()),
     MenuItem(Icons.history, Color(0xFF06B6D4), 'Histórico', HistoricoScreen()),
     MenuItem(Icons.lock_outline, Color(0xFF8B5CF6), 'Senha', SenhaScreen()),
@@ -250,37 +252,37 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Salvo no histórico.')));
   }
 
-  Future<String> _status0() async {
+  // ---- coletas ----
+  Future<Map<String, String>> _status0() async {
     final info = NetworkInfo();
+    final d = <String, String>{};
     try {
-      return 'SSID: ${(await info.getWifiName())?.replaceAll('"', '') ?? '—'}\n'
-          'IP: ${await info.getWifiIP() ?? '—'}\n'
-          'Máscara: ${await info.getWifiSubmask() ?? '—'}\n'
-          'Gateway: ${await info.getWifiGatewayIP() ?? '—'}\n'
-          'MAC (BSSID): ${await info.getWifiBSSID() ?? '—'}';
-    } catch (e) { return 'erro: $e'; }
+      d['Rede (SSID)'] = (await info.getWifiName())?.replaceAll('"', '') ?? '—';
+      d['IP'] = await info.getWifiIP() ?? '—';
+      d['Máscara'] = await info.getWifiSubmask() ?? '—';
+      d['Gateway'] = await info.getWifiGatewayIP() ?? '—';
+      final bssid = await info.getWifiBSSID();
+      d['MAC'] = bssid ?? '—';
+      try {
+        final can = await WiFiScan.instance.canStartScan();
+        if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(seconds: 2)); }
+        final res = await WiFiScan.instance.getScannedResults();
+        final me = res.where((r) => r.bssid.toLowerCase() == bssid?.toLowerCase());
+        d['Segurança'] = me.isNotEmpty ? segDaCapabilities(me.first.capabilities) : '—';
+      } catch (_) { d['Segurança'] = '—'; }
+    } catch (_) {}
+    return d;
   }
 
-  Future<(String, int?, double?)> _ping() async {
+  Future<(int?, double?)> _ping() async {
     try {
       final r = await Process.run('ping', ['-c', '4', '8.8.8.8']).timeout(const Duration(seconds: 30));
-      final out = r.stdout.toString().trim();
+      final out = r.stdout.toString();
       final tempos = RegExp(r'time=([\d.]+)').allMatches(out).map((m) => double.parse(m.group(1)!)).toList();
       final perda = int.tryParse(RegExp(r'(\d+)% packet loss').firstMatch(out)?.group(1) ?? '');
       final media = tempos.isEmpty ? null : tempos.reduce((a, b) => a + b) / tempos.length;
-      return (out, perda, media);
-    } catch (e) { return ('erro ao executar ping: $e', null, null); }
-  }
-
-  Future<String> _tracert() async {
-    for (final bin in ['traceroute', '/system/bin/traceroute']) {
-      try {
-        final r = await Process.run(bin, ['-n', '-m', '15', '8.8.8.8']).timeout(const Duration(seconds: 40));
-        final out = (r.stdout.toString() + r.stderr.toString()).trim();
-        if (out.isNotEmpty && !out.toLowerCase().contains('not found')) return out;
-      } catch (_) {}
-    }
-    return 'traceroute indisponível neste Android (geralmente exige root).';
+      return (perda, media);
+    } catch (_) { return (null, null); }
   }
 
   Future<(String, String, String)> _canais() async {
@@ -288,61 +290,41 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
       final can = await WiFiScan.instance.canStartScan();
       if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(seconds: 3)); }
       final redes = await WiFiScan.instance.getScannedResults();
-      if (redes.isEmpty) return ('nenhuma rede detectada', '—', '—');
-      final sb = StringBuffer('Redes encontradas: ${redes.length}');
-      String best24 = '—', best5 = '—';
-      for (final banda in ['2.4', '5']) {
-        final lista = redes.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == banda).toList();
-        if (lista.isEmpty) { sb.write('\n=== $banda GHz: nenhuma ==='); continue; }
-        sb.write('\n=== $banda GHz (${lista.length} redes) ===');
-        final porCanal = <int, int>{};
-        for (final r in lista) { final c = canalDaFrequencia(r.frequency)!; porCanal[c] = (porCanal[c] ?? 0) + 1; }
-        final canais = porCanal.keys.toList()..sort();
-        for (final c in canais) { sb.write('\n  Canal $c: ${porCanal[c]} rede(s)'); }
-        if (banda == '2.4') {
-          double p(int c) => lista.fold(0.0, (a, r) { final ch = canalDaFrequencia(r.frequency)!; final d = (c - ch).abs(); return a + (d == 0 ? 1.0 : (d < 5 ? (5 - d) / 5 : 0.0)) * rssiParaPorcento(r.level) / 100; });
-          best24 = '${[1, 6, 11].reduce((a, b) => p(a) <= p(b) ? a : b)}';
-          sb.write('\n  >>> Melhor canal: $best24');
-        } else {
-          final cand = {...lista.map((r) => canalDaFrequencia(r.frequency)!), 36, 40, 44, 48, 149, 153, 157, 161}.toList()..sort();
-          double p(int c) => lista.fold(0.0, (a, r) { final ch = canalDaFrequencia(r.frequency)!; final d = (c - ch).abs(); return a + (ch == c ? 1.0 : (d <= 2 ? 0.3 : 0.0)) * rssiParaPorcento(r.level) / 100; });
-          best5 = '${cand.reduce((a, b) => p(a) <= p(b) ? a : b)}';
-          sb.write('\n  >>> Melhor canal: $best5');
-        }
-      }
-      return (sb.toString(), best24, best5);
-    } catch (e) { return ('erro: $e', '—', '—'); }
+      if (redes.isEmpty) return ('Nenhuma rede detectada', '—', '—');
+      final r24 = redes.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == '2.4').toList();
+      final r5 = redes.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == '5').toList();
+      double p24(int c) => r24.fold(0.0, (a, r) { final ch = canalDaFrequencia(r.frequency)!; final d = (c - ch).abs(); return a + (d == 0 ? 1.0 : (d < 5 ? (5 - d) / 5 : 0.0)) * rssiParaPorcento(r.level) / 100; });
+      final b24 = r24.isEmpty ? '—' : '${[1, 6, 11].reduce((a, b) => p24(a) <= p24(b) ? a : b)}';
+      final cand = {...r5.map((r) => canalDaFrequencia(r.frequency)!), 36, 40, 44, 48, 149, 153, 157, 161}.toList()..sort();
+      double p5(int c) => r5.fold(0.0, (a, r) { final ch = canalDaFrequencia(r.frequency)!; final d = (c - ch).abs(); return a + (ch == c ? 1.0 : (d <= 2 ? 0.3 : 0.0)) * rssiParaPorcento(r.level) / 100; });
+      final b5 = r5.isEmpty ? '—' : '${cand.reduce((a, b) => p5(a) <= p5(b) ? a : b)}';
+      final txt = 'Redes 2.4 GHz: ${r24.length}  |  Redes 5 GHz: ${r5.length}';
+      return (txt, b24, b5);
+    } catch (_) { return ('erro', '—', '—'); }
   }
 
-  Future<String> _dns() async {
+  Future<List<String>> _dns() async {
     final linhas = <String>[];
     try {
       final t = DateTime.now();
       final a = await InternetAddress.lookup('google.com');
       final ip = a.firstWhere((x) => x.type == InternetAddressType.IPv4, orElse: () => a.first).address;
-      linhas.add('Operadora (sistema): ${DateTime.now().difference(t).inMilliseconds} ms  ->  $ip');
-    } catch (_) { linhas.add('Operadora (sistema): falhou'); }
-    for (final p in [['Google 8.8.8.8', 'https://dns.google/resolve?name=google.com&type=A', <String, String>{}], ['Cloudflare 1.1.1.1', 'https://cloudflare-dns.com/dns-query?name=google.com&type=A', {'Accept': 'application/dns-json'}]]) {
+      linhas.add('Operadora: ${DateTime.now().difference(t).inMilliseconds} ms  ($ip)');
+    } catch (_) { linhas.add('Operadora: falhou'); }
+    for (final p in [['Google', 'https://dns.google/resolve?name=google.com&type=A', <String, String>{}], ['Cloudflare', 'https://cloudflare-dns.com/dns-query?name=google.com&type=A', {'Accept': 'application/dns-json'}]]) {
       try {
         final t = DateTime.now();
-        final r = await http.get(Uri.parse(p[1] as String), headers: p[2] as Map<String, String>).timeout(const Duration(seconds: 8));
-        final d = jsonDecode(r.body);
-        final ans = (d['Answer'] as List?)?.where((a) => a['type'] == 1).map((a) => a['data']).toList() ?? [];
-        linhas.add('${p[0]}: ${DateTime.now().difference(t).inMilliseconds} ms  ->  ${ans.isNotEmpty ? ans.first : "sem registro A"}');
+        await http.get(Uri.parse(p[1] as String), headers: p[2] as Map<String, String>).timeout(const Duration(seconds: 8));
+        linhas.add('${p[0]}: ${DateTime.now().difference(t).inMilliseconds} ms');
       } catch (_) { linhas.add('${p[0]}: erro'); }
     }
-    return linhas.join('\n');
+    return linhas;
   }
 
   Future<(double, double, int)> _vel() async {
     int ping = 0;
     double down = 0, up = 0;
-    try {
-      final t = DateTime.now();
-      final s = await Socket.connect('speed.cloudflare.com', 443, timeout: const Duration(seconds: 4));
-      s.destroy();
-      ping = DateTime.now().difference(t).inMilliseconds;
-    } catch (_) {}
+    try { final t = DateTime.now(); final s = await Socket.connect('speed.cloudflare.com', 443, timeout: const Duration(seconds: 4)); s.destroy(); ping = DateTime.now().difference(t).inMilliseconds; } catch (_) {}
     try {
       final client = http.Client();
       final resp = await client.send(http.Request('GET', Uri.parse('https://speed.cloudflare.com/__down?bytes=25000000')));
@@ -365,78 +347,91 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
 
   Future<void> _rodar() async {
     setState(() { _rodando = true; _relatorio = ''; });
-    final sb = StringBuffer();
-    final bar = '=' * 46;
-    sb.writeln(bar);
-    sb.writeln(' RELATÓRIO DE REDE');
-    sb.writeln(' Data: ${DateTime.now().toString().substring(0, 19)}');
-    if (_cliente.text.trim().isNotEmpty) sb.writeln(' Cliente: ${_cliente.text.trim()}');
-    if (_protocolo.text.trim().isNotEmpty) sb.writeln(' Protocolo: ${_protocolo.text.trim()}');
-    sb.writeln(bar);
 
     setState(() => _status = 'Coletando status...');
-    sb.writeln('\n[1] STATUS DA REDE\n${await _status0()}');
-
-    setState(() => _status = 'Testando conexão (ping + traceroute)...');
-    final (pingTxt, perda, media) = await _ping();
-    sb.writeln('\n[2] CONEXÃO (PING)\n$pingTxt');
-    sb.writeln('\n[2b] TRACEROUTE\n${await _tracert()}');
-
+    final st = await _status0();
+    setState(() => _status = 'Testando conexão...');
+    final (perda, media) = await _ping();
     setState(() => _status = 'Escaneando canais...');
     final (canTxt, b24, b5) = await _canais();
-    sb.writeln('\n[3] CANAIS WI-FI\n$canTxt');
-
     setState(() => _status = 'Testando DNS...');
-    sb.writeln('\n[4] DNS\n${await _dns()}');
-
+    final dns = await _dns();
     setState(() => _status = 'Medindo velocidade...');
     final (down, up, vping) = await _vel();
-    sb.writeln('\n[5] VELOCIDADE (Cloudflare)\nDownload: ${down.toStringAsFixed(1)} Mbps | Upload: ${up.toStringAsFixed(1)} Mbps | Latência: $vping ms');
 
-    // Resumo
-    sb.writeln('\n$bar\n RESUMO');
-    sb.writeln(perda == 100 ? ' ✗ Sem resposta da internet (perda 100%).' : ' ✓ Internet respondendo${media != null ? " (latência média ${media.toStringAsFixed(0)} ms)" : ""}.');
-    sb.writeln(' • Velocidade: ~${down.toStringAsFixed(1)} Mbps down / ~${up.toStringAsFixed(1)} Mbps up.');
-    sb.writeln(' • Melhor canal 2.4 GHz: $b24 | 5 GHz: $b5.');
-    sb.writeln(bar);
+    final L = StringBuffer();
+    L.writeln('╔══════════════════════════════╗');
+    L.writeln('       RELATÓRIO DE REDE');
+    L.writeln('╚══════════════════════════════╝');
+    L.writeln('Data: ${DateTime.now().toString().substring(0, 16)}');
+    if (_cliente.text.trim().isNotEmpty) L.writeln('Cliente: ${_cliente.text.trim()}');
+    if (_protocolo.text.trim().isNotEmpty) L.writeln('Protocolo: ${_protocolo.text.trim()}');
 
-    if (mounted) setState(() { _rodando = false; _status = 'Concluído.'; _relatorio = sb.toString(); });
+    L.writeln('\n── RESUMO ──────────────────');
+    L.writeln(perda == 100 ? '✗ Internet: SEM resposta' : '✓ Internet: OK${media != null ? " (${media.toStringAsFixed(0)} ms)" : ""}');
+    L.writeln('• Velocidade: ${down.toStringAsFixed(1)} Mbps ↓  /  ${up.toStringAsFixed(1)} Mbps ↑');
+    L.writeln('• Melhor canal: 2.4 GHz → $b24   |   5 GHz → $b5');
+    L.writeln('• Segurança: ${st['Segurança'] ?? '—'}');
+
+    L.writeln('\n── 1. STATUS DA REDE ───────');
+    for (final e in st.entries) { L.writeln('${e.key.padRight(12)}: ${e.value}'); }
+
+    L.writeln('\n── 2. CONEXÃO ──────────────');
+    L.writeln('Latência média : ${media != null ? "${media.toStringAsFixed(0)} ms" : "sem resposta"}');
+    L.writeln('Perda de pacote: ${perda ?? "?"}%');
+
+    L.writeln('\n── 3. CANAIS WI-FI ─────────');
+    L.writeln(canTxt);
+    L.writeln('Melhor 2.4 GHz : $b24');
+    L.writeln('Melhor 5 GHz   : $b5');
+
+    L.writeln('\n── 4. DNS ──────────────────');
+    for (final l in dns) { L.writeln(l); }
+
+    L.writeln('\n── 5. VELOCIDADE ───────────');
+    L.writeln('Download: ${down.toStringAsFixed(1)} Mbps');
+    L.writeln('Upload  : ${up.toStringAsFixed(1)} Mbps');
+    L.writeln('Latência: $vping ms  (Cloudflare)');
+
+    if (mounted) setState(() { _rodando = false; _status = 'Concluído.'; _relatorio = L.toString(); });
   }
 
-  Future<void> _compartilharTxt() async {
-    if (_relatorio.isEmpty) return;
-    await Share.share(_relatorio, subject: 'Relatório de Rede');
-  }
-
-  Future<void> _whatsapp() async {
-    if (_relatorio.isEmpty) return;
-    final uri = Uri.parse('https://wa.me/?text=${Uri.encodeComponent(_relatorio)}');
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
-  }
-
-  Future<void> _gerarPdf() async {
-    if (_relatorio.isEmpty) return;
+  // ---- saídas ----
+  Future<Uint8List> _buildPdf() async {
     pw.MemoryImage? logoImg;
     if (_logo != null) { try { logoImg = pw.MemoryImage(await _logo!.readAsBytes()); } catch (_) {} }
-    await Printing.layoutPdf(onLayout: (format) async {
-      final doc = pw.Document();
-      doc.addPage(pw.MultiPage(build: (c) => [
-            pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
-              if (logoImg != null) pw.Padding(padding: const pw.EdgeInsets.only(right: 12), child: pw.Image(logoImg, width: 60, height: 60)),
-              pw.Text('Relatório de Rede', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
-            ]),
-            pw.SizedBox(height: 10),
-            pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: _relatorio.split('\n').map((l) => pw.Text(l, style: const pw.TextStyle(fontSize: 9))).toList()),
-          ]));
-      return doc.save();
-    });
+    final doc = pw.Document();
+    final corpo = <pw.Widget>[];
+    for (final linha in _relatorio.split('\n')) {
+      if (linha.startsWith('╔') || linha.startsWith('╚') || linha.contains('RELATÓRIO DE REDE')) continue;
+      if (linha.startsWith('──')) {
+        corpo.add(pw.SizedBox(height: 8));
+        corpo.add(pw.Text(linha.replaceAll('─', '').trim(), style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)));
+      } else if (linha.trim().isEmpty) {
+        corpo.add(pw.SizedBox(height: 2));
+      } else {
+        corpo.add(pw.Text(linha, style: const pw.TextStyle(fontSize: 10)));
+      }
+    }
+    doc.addPage(pw.MultiPage(build: (c) => [
+          pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
+            if (logoImg != null) pw.Padding(padding: const pw.EdgeInsets.only(right: 12), child: pw.Image(logoImg, width: 56, height: 56)),
+            pw.Text('Relatório de Rede', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold)),
+          ]),
+          pw.Divider(),
+          ...corpo,
+        ]));
+    return doc.save();
   }
+
+  Future<void> _gerarPdf() async { if (_relatorio.isEmpty) return; final b = await _buildPdf(); await Printing.layoutPdf(onLayout: (f) async => b); }
+  Future<void> _enviarPdf() async { if (_relatorio.isEmpty) return; final b = await _buildPdf(); await Printing.sharePdf(bytes: b, filename: 'Relatorio_de_Rede.pdf'); }
+  Future<void> _compartilharTxt() async { if (_relatorio.isEmpty) return; await Share.share(_relatorio, subject: 'Relatório de Rede'); }
 
   @override
   Widget build(BuildContext context) {
     return ListView(children: [
-      Secao(titulo: '🔎 Teste Geral', desc: 'Roda todos os testes e gera um relatório completo pra compartilhar (TXT/WhatsApp) ou salvar em PDF.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Secao(titulo: '🔎 Teste Geral', desc: 'Roda todos os testes e gera um relatório organizado. Envie o PDF pelo WhatsApp, salve ou compartilhe.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         TextField(controller: _cliente, style: const TextStyle(color: kTxt), decoration: campoDeco('Cliente (opcional)')),
         const SizedBox(height: 8),
         TextField(controller: _protocolo, style: const TextStyle(color: kTxt), decoration: campoDeco('Protocolo / chamado (opcional)')),
@@ -452,15 +447,15 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
         if (_relatorio.isNotEmpty) ...[
           saidaMono(_relatorio),
           const SizedBox(height: 12),
+          BotaoRun('📲 Enviar PDF (WhatsApp, e-mail...)', cor: const Color(0xFF25D366), onTap: _enviarPdf),
+          const SizedBox(height: 8),
           Row(children: [
-            Expanded(child: BotaoRun('WhatsApp', cor: const Color(0xFF25D366), onTap: _whatsapp)),
+            Expanded(child: BotaoRun('Ver/Salvar PDF', cor: kBad, onTap: _gerarPdf)),
             const SizedBox(width: 8),
             Expanded(child: BotaoRun('TXT', cor: kOk, onTap: _compartilharTxt)),
             const SizedBox(width: 8),
-            Expanded(child: BotaoRun('PDF', cor: kBad, onTap: _gerarPdf)),
+            Expanded(child: BotaoRun('Salvar', cor: kCard2, onTap: _salvarHistorico)),
           ]),
-          const SizedBox(height: 8),
-          BotaoRun('Salvar no histórico', cor: kCard2, onTap: _salvarHistorico),
         ],
       ])),
     ]);
@@ -1526,6 +1521,138 @@ class _HistoricoScreenState extends State<HistoricoScreen> {
       ])),
     ]);
   }
+}
+
+
+// ========================= MAPA POR CAMINHADA (sensores) =========================
+class _WP {
+  final Offset pos;
+  final int? sinal;
+  _WP(this.pos, this.sinal);
+}
+
+class CaminhadaScreen extends StatefulWidget {
+  const CaminhadaScreen({super.key});
+  @override
+  State<CaminhadaScreen> createState() => _CaminhadaScreenState();
+}
+class _CaminhadaScreenState extends State<CaminhadaScreen> {
+  bool _rodando = false;
+  int _passos = 0;
+  double _heading = 0;
+  Offset _pos = Offset.zero;
+  DateTime _lastStep = DateTime.fromMillisecondsSinceEpoch(0);
+  final List<_WP> _pts = [];
+  String? _ssid;
+  StreamSubscription? _acc, _mag;
+  Timer? _sample;
+  static const double _passoM = 0.7;
+
+  Future<int?> _sinalAtual() async {
+    try {
+      final can = await WiFiScan.instance.canStartScan();
+      if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(milliseconds: 400)); }
+      final res = await WiFiScan.instance.getScannedResults();
+      Iterable<WiFiAccessPoint> meu = res;
+      if (_ssid != null && _ssid!.isNotEmpty) { final f = res.where((r) => r.ssid == _ssid); if (f.isNotEmpty) meu = f; }
+      if (meu.isEmpty) return null;
+      return rssiParaPorcento(meu.map((r) => r.level).reduce(max));
+    } catch (_) { return null; }
+  }
+
+  Future<void> _iniciar() async {
+    await Permission.locationWhenInUse.request();
+    _ssid = (await NetworkInfo().getWifiName())?.replaceAll('"', '');
+    setState(() { _rodando = true; _passos = 0; _pos = Offset.zero; _pts.clear(); });
+    _mag = magnetometerEvents.listen((e) { _heading = atan2(e.y, e.x); });
+    _acc = userAccelerometerEvents.listen((e) {
+      final m = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+      final now = DateTime.now();
+      if (m > 2.2 && now.difference(_lastStep).inMilliseconds > 350) {
+        _lastStep = now;
+        _passos++;
+        _pos += Offset(cos(_heading), sin(_heading)) * _passoM;
+        setState(() {});
+      }
+    });
+    _sample = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+      final s = await _sinalAtual();
+      if (mounted) setState(() => _pts.add(_WP(_pos, s)));
+    });
+  }
+
+  void _parar() { _acc?.cancel(); _mag?.cancel(); _sample?.cancel(); setState(() => _rodando = false); }
+
+  @override
+  void dispose() { _acc?.cancel(); _mag?.cancel(); _sample?.cancel(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(children: [
+      Secao(titulo: '🚶 Mapa por Caminhada', desc: 'Ande pela casa com o celular na mão (tela pra cima). O app traça seu trajeto pelos sensores e colore pelo sinal (verde = forte, vermelho = fraco).', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Container(
+          height: 320,
+          decoration: BoxDecoration(color: const Color(0xFF0A1020), borderRadius: BorderRadius.circular(12), border: Border.all(color: kLine)),
+          clipBehavior: Clip.antiAlias,
+          child: CustomPaint(painter: _WalkPainter(_pts, _pos, _rodando), child: const SizedBox.expand()),
+        ),
+        const SizedBox(height: 10),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
+          _s('$_passos', 'passos'),
+          _s('${_pts.length}', 'medições'),
+          _s('${(_passos * _passoM).toStringAsFixed(0)} m', 'distância'),
+        ]),
+        const SizedBox(height: 12),
+        BotaoRun(_rodando ? 'Parar' : 'Iniciar caminhada', cor: _rodando ? kBad : kOk, onTap: _rodando ? _parar : _iniciar),
+        const SizedBox(height: 8),
+        const Text('Experimental: bússola e passos têm desvio em ambientes fechados, então o traçado é aproximado. Ande em ritmo constante e segure o celular estável.', style: TextStyle(color: kMuted, fontSize: 11)),
+      ])),
+    ]);
+  }
+  Widget _s(String v, String l) => Column(children: [
+        Text(v, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kAccent)),
+        Text(l, style: const TextStyle(fontSize: 10, color: kMuted)),
+      ]);
+}
+
+class _WalkPainter extends CustomPainter {
+  final List<_WP> pts;
+  final Offset atual;
+  final bool rodando;
+  _WalkPainter(this.pts, this.atual, this.rodando);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final todos = [...pts.map((p) => p.pos), atual];
+    double minX = todos.map((p) => p.dx).reduce(min), maxX = todos.map((p) => p.dx).reduce(max);
+    double minY = todos.map((p) => p.dy).reduce(min), maxY = todos.map((p) => p.dy).reduce(max);
+    final larg = (maxX - minX).abs() < 1 ? 1.0 : (maxX - minX);
+    final alt = (maxY - minY).abs() < 1 ? 1.0 : (maxY - minY);
+    const pad = 30.0;
+    final escala = min((size.width - 2 * pad) / larg, (size.height - 2 * pad) / alt);
+    Offset proj(Offset p) => Offset(pad + (p.dx - minX) * escala, pad + (p.dy - minY) * escala);
+    // trilha
+    if (pts.length > 1) {
+      final path = Path()..moveTo(proj(pts.first.pos).dx, proj(pts.first.pos).dy);
+      for (final p in pts.skip(1)) { final o = proj(p.pos); path.lineTo(o.dx, o.dy); }
+      canvas.drawPath(path, Paint()..color = kLine..strokeWidth = 2..style = PaintingStyle.stroke);
+    }
+    // pontos
+    for (final p in pts) {
+      final o = proj(p.pos);
+      final cor = p.sinal == null ? Colors.grey : corSinal(p.sinal!);
+      canvas.drawCircle(o, 7, Paint()..color = cor.withValues(alpha: .85));
+    }
+    // posição atual
+    final a = proj(atual);
+    canvas.drawCircle(a, 9, Paint()..color = kAccent);
+    canvas.drawCircle(a, 9, Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 2);
+    if (pts.isEmpty) {
+      final tp = TextPainter(text: const TextSpan(text: 'Toque em Iniciar e ande pela casa', style: TextStyle(color: kMuted, fontSize: 12)), textDirection: TextDirection.ltr)..layout();
+      tp.paint(canvas, Offset((size.width - tp.width) / 2, size.height / 2));
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _WalkPainter old) => true;
 }
 
 
