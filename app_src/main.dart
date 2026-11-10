@@ -16,6 +16,8 @@ import 'package:printing/printing.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const DiagApp());
 
@@ -144,6 +146,8 @@ class HomePage extends StatelessWidget {
     MenuItem(Icons.sports_esports, Color(0xFFEC4899), 'Qualidade', QualidadeScreen()),
     MenuItem(Icons.qr_code_2, Color(0xFF60A5FA), 'QR Wi-Fi', QrWifiScreen()),
     MenuItem(Icons.router, Color(0xFFF59E0B), 'Roteador', RoteadorScreen()),
+    MenuItem(Icons.map_outlined, Color(0xFFEF4444), 'Planta', PlantaScreen()),
+    MenuItem(Icons.history, Color(0xFF06B6D4), 'Histórico', HistoricoScreen()),
     MenuItem(Icons.lock_outline, Color(0xFF8B5CF6), 'Senha', SenhaScreen()),
   ];
 
@@ -230,6 +234,21 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
   String _relatorio = '';
   final _cliente = TextEditingController();
   final _protocolo = TextEditingController();
+  File? _logo;
+
+  Future<void> _pickLogo() async {
+    final x = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
+    if (x != null && mounted) setState(() => _logo = File(x.path));
+  }
+
+  Future<void> _salvarHistorico() async {
+    if (_relatorio.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList('hist') ?? [];
+    raw.add(jsonEncode({'data': DateTime.now().toString().substring(0, 19), 'cliente': _cliente.text.trim(), 'texto': _relatorio}));
+    await prefs.setStringList('hist', raw);
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Salvo no histórico.')));
+  }
 
   Future<String> _status0() async {
     final info = NetworkInfo();
@@ -397,10 +416,16 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
 
   Future<void> _gerarPdf() async {
     if (_relatorio.isEmpty) return;
+    pw.MemoryImage? logoImg;
+    if (_logo != null) { try { logoImg = pw.MemoryImage(await _logo!.readAsBytes()); } catch (_) {} }
     await Printing.layoutPdf(onLayout: (format) async {
       final doc = pw.Document();
       doc.addPage(pw.MultiPage(build: (c) => [
-            pw.Header(level: 0, text: 'Relatório de Rede'),
+            pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
+              if (logoImg != null) pw.Padding(padding: const pw.EdgeInsets.only(right: 12), child: pw.Image(logoImg, width: 60, height: 60)),
+              pw.Text('Relatório de Rede', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+            ]),
+            pw.SizedBox(height: 10),
             pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start,
                 children: _relatorio.split('\n').map((l) => pw.Text(l, style: const pw.TextStyle(fontSize: 9))).toList()),
           ]));
@@ -415,6 +440,8 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
         TextField(controller: _cliente, style: const TextStyle(color: kTxt), decoration: campoDeco('Cliente (opcional)')),
         const SizedBox(height: 8),
         TextField(controller: _protocolo, style: const TextStyle(color: kTxt), decoration: campoDeco('Protocolo / chamado (opcional)')),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(onPressed: _pickLogo, icon: Icon(_logo == null ? Icons.add_photo_alternate_outlined : Icons.check, size: 18), label: Text(_logo == null ? 'Logo no PDF (opcional)' : 'Logo selecionada ✓'), style: OutlinedButton.styleFrom(foregroundColor: kMuted, side: const BorderSide(color: kLine))),
         const SizedBox(height: 12),
         BotaoRun(_rodando ? 'Rodando...' : 'Rodar teste geral', onTap: _rodando ? null : _rodar),
         if (_status.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 10), child: Row(children: [
@@ -432,6 +459,8 @@ class _TesteGeralScreenState extends State<TesteGeralScreen> {
             const SizedBox(width: 8),
             Expanded(child: BotaoRun('PDF', cor: kBad, onTap: _gerarPdf)),
           ]),
+          const SizedBox(height: 8),
+          BotaoRun('Salvar no histórico', cor: kCard2, onTap: _salvarHistorico),
         ],
       ])),
     ]);
@@ -1317,6 +1346,176 @@ class _RoteadorScreenState extends State<RoteadorScreen> {
         BotaoRun('Abrir painel do roteador', onTap: _gw == null ? null : _abrir),
         const SizedBox(height: 14),
         const Text('Dicas de acesso comuns:\n• Usuário/senha costumam ser admin/admin ou estão na etiqueta do roteador.\n• Se não abrir, digite o IP do gateway direto no navegador.', style: TextStyle(color: kMuted, fontSize: 12)),
+      ])),
+    ]);
+  }
+}
+
+
+// ========================= PLANTA REAL (mapa de calor sobre a imagem) =========================
+class _PP {
+  final Offset rel;
+  final int? r24;
+  final int? r5;
+  _PP(this.rel, this.r24, this.r5);
+}
+
+class PlantaScreen extends StatefulWidget {
+  const PlantaScreen({super.key});
+  @override
+  State<PlantaScreen> createState() => _PlantaScreenState();
+}
+class _PlantaScreenState extends State<PlantaScreen> {
+  File? _img;
+  String _banda = '2.4';
+  String? _ssid;
+  bool _medindo = false;
+  final List<_PP> _pts = [];
+
+  Future<(int?, int?)> _medir() async {
+    try {
+      final can = await WiFiScan.instance.canStartScan();
+      if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(milliseconds: 600)); }
+      final res = await WiFiScan.instance.getScannedResults();
+      _ssid ??= (await NetworkInfo().getWifiName())?.replaceAll('"', '');
+      Iterable<WiFiAccessPoint> meu = res;
+      if (_ssid != null && _ssid!.isNotEmpty) { final f = res.where((r) => r.ssid == _ssid); if (f.isNotEmpty) meu = f; }
+      int? best(String b) { final g = meu.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == b); return g.isEmpty ? null : g.map((r) => r.level).reduce(max); }
+      return (best('2.4'), best('5'));
+    } catch (_) { return (null, null); }
+  }
+
+  Future<void> _carregar() async {
+    final x = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 80);
+    if (x != null && mounted) setState(() => _img = File(x.path));
+  }
+
+  Future<void> _tap(Offset rel) async {
+    if (_img == null) return;
+    await Permission.locationWhenInUse.request();
+    setState(() => _medindo = true);
+    final (a, b) = await _medir();
+    if (mounted) setState(() { _pts.add(_PP(rel, a, b)); _medindo = false; });
+  }
+
+  int? _v(_PP p) => _banda == '2.4' ? p.r24 : p.r5;
+
+  String _diag() {
+    final vals = _pts.map(_v).whereType<int>().toList();
+    if (vals.isEmpty) return 'Carregue a planta e toque nos locais da casa para medir.';
+    final melhor = _pts.where((p) => _v(p) != null).reduce((a, b) => _v(a)! >= _v(b)! ? a : b);
+    final fracos = _pts.where((p) { final v = _v(p); return v != null && rssiParaPorcento(v) < 40; }).length;
+    final sb = StringBuffer('Banda $_banda GHz — pontos: ${vals.length} | melhor: ${_v(melhor)} dBm (${rssiParaPorcento(_v(melhor)!)}%)');
+    if (fracos >= 1) sb.write('\n⚠ $fracos ponto(s) fraco(s) — repetidor/mesh recomendado nessas áreas.');
+    else sb.write('\n✓ Cobertura boa nesta banda.');
+    return sb.toString();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(children: [
+      Secao(titulo: '🗺️ Planta da Casa (mapa de calor)', desc: 'Carregue a planta (ou uma foto dela), ande pela casa e toque no ponto onde está — o sinal medido aparece sobre a planta.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: ['2.4', '5'].map((b) {
+          final sel = _banda == b;
+          return Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: GestureDetector(
+            onTap: () => setState(() => _banda = b),
+            child: Container(padding: const EdgeInsets.symmetric(vertical: 9), alignment: Alignment.center, decoration: BoxDecoration(gradient: sel ? const LinearGradient(colors: [kAccent, kAccent2]) : null, color: sel ? null : kCard2, borderRadius: BorderRadius.circular(10)), child: Text('$b GHz', style: TextStyle(color: sel ? const Color(0xFF041320) : kMuted, fontWeight: FontWeight.w700))),
+          )));
+        }).toList()),
+        const SizedBox(height: 12),
+        LayoutBuilder(builder: (ctx, cons) {
+          final w = cons.maxWidth, h = 360.0;
+          return GestureDetector(
+            onTapDown: (d) => _tap(Offset(d.localPosition.dx / w, d.localPosition.dy / h)),
+            child: Container(
+              width: w, height: h,
+              decoration: BoxDecoration(
+                color: const Color(0xFF0A1020), borderRadius: BorderRadius.circular(12), border: Border.all(color: kLine),
+                image: _img != null ? DecorationImage(image: FileImage(_img!), fit: BoxFit.contain) : null,
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Stack(children: [
+                if (_img == null) const Center(child: Text('Toque em "Carregar planta"', style: TextStyle(color: kMuted))),
+                ..._pts.map((p) {
+                  final v = _v(p);
+                  final cor = v == null ? Colors.grey : corSinal(rssiParaPorcento(v));
+                  return Positioned(
+                    left: p.rel.dx * w - 16, top: p.rel.dy * h - 16,
+                    child: Container(
+                      width: 32, height: 32, alignment: Alignment.center,
+                      decoration: BoxDecoration(color: cor.withValues(alpha: .85), shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 1.5)),
+                      child: Text(v == null ? '—' : '$v', style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold)),
+                    ),
+                  );
+                }),
+              ]),
+            ),
+          );
+        }),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(child: BotaoRun(_img == null ? 'Carregar planta' : 'Trocar planta', cor: kCard2, onTap: _carregar)),
+          const SizedBox(width: 10),
+          IconButton.filledTonal(onPressed: _pts.isEmpty ? null : () => setState(() => _pts.clear()), icon: const Icon(Icons.delete_outline)),
+        ]),
+        Container(margin: const EdgeInsets.only(top: 10), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)), child: Text(_medindo ? 'medindo ponto...' : _diag(), style: const TextStyle(color: kTxt, fontSize: 13))),
+      ])),
+    ]);
+  }
+}
+
+// ========================= HISTÓRICO DE ATENDIMENTOS =========================
+class HistoricoScreen extends StatefulWidget {
+  const HistoricoScreen({super.key});
+  @override
+  State<HistoricoScreen> createState() => _HistoricoScreenState();
+}
+class _HistoricoScreenState extends State<HistoricoScreen> {
+  List<Map<String, dynamic>> _itens = [];
+  @override
+  void initState() { super.initState(); _carregar(); }
+  Future<void> _carregar() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList('hist') ?? [];
+    setState(() => _itens = raw.map((e) => jsonDecode(e) as Map<String, dynamic>).toList().reversed.toList());
+  }
+  Future<void> _apagar(int idxReverso) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList('hist') ?? [];
+    final realIdx = raw.length - 1 - idxReverso;
+    if (realIdx >= 0 && realIdx < raw.length) { raw.removeAt(realIdx); await prefs.setStringList('hist', raw); }
+    _carregar();
+  }
+  void _ver(Map<String, dynamic> it) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: kCard,
+      title: Text(it['cliente']?.toString().isNotEmpty == true ? it['cliente'] : 'Relatório', style: const TextStyle(color: kTxt, fontSize: 16)),
+      content: SizedBox(width: double.maxFinite, child: SingleChildScrollView(child: Text(it['texto'] ?? '', style: const TextStyle(color: kMuted, fontFamily: 'monospace', fontSize: 11)))),
+      actions: [
+        TextButton(onPressed: () { Share.share(it['texto'] ?? ''); }, child: const Text('Compartilhar')),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Fechar')),
+      ],
+    ));
+  }
+  @override
+  Widget build(BuildContext context) {
+    return ListView(children: [
+      Secao(titulo: '📁 Histórico de Atendimentos', desc: 'Relatórios salvos no aparelho. Toque para ver ou compartilhar.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        if (_itens.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 10), child: Text('Nenhum relatório salvo ainda. No Teste Geral, toque em "Salvar" após rodar.', style: TextStyle(color: kMuted, fontSize: 13))),
+        ..._itens.asMap().entries.map((e) => Container(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)),
+              child: Row(children: [
+                const Icon(Icons.description, color: kAccent),
+                const SizedBox(width: 10),
+                Expanded(child: GestureDetector(onTap: () => _ver(e.value), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(e.value['cliente']?.toString().isNotEmpty == true ? e.value['cliente'] : 'Sem cliente', style: const TextStyle(color: kTxt, fontWeight: FontWeight.w600)),
+                  Text(e.value['data'] ?? '', style: const TextStyle(color: kMuted, fontSize: 12)),
+                ]))),
+                IconButton(onPressed: () => _apagar(e.key), icon: const Icon(Icons.close, color: kMuted, size: 18)),
+              ]),
+            )),
       ])),
     ]);
   }

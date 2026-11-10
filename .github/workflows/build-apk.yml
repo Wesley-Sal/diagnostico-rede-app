@@ -33,7 +33,7 @@ jobs:
         run: cp app_src/main.dart lib/main.dart
 
       - name: Adicionar os plugins (versões estáveis fixadas)
-        run: flutter pub add wifi_scan:^0.4.1 network_info_plus:^5.0.3 permission_handler:^11.3.1 http:^1.2.0 share_plus:^7.2.2 printing:^5.12.0 pdf:^3.10.8 qr_flutter:^4.1.0 url_launcher:^6.2.6
+        run: flutter pub add wifi_scan:^0.4.1 network_info_plus:^5.0.3 permission_handler:^11.3.1 http:^1.2.0 share_plus:^7.2.2 printing:^5.12.0 pdf:^3.10.8 qr_flutter:^4.1.0 url_launcher:^6.2.6 image_picker:^1.0.7 shared_preferences:^2.2.2
 
       - name: Injetar permissões no AndroidManifest
         run: |
