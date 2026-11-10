@@ -1390,6 +1390,11 @@ class _PlantaScreenState extends State<PlantaScreen> {
     if (x != null && mounted) setState(() => _img = File(x.path));
   }
 
+  Future<void> _carregarCamera() async {
+    final x = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 80);
+    if (x != null && mounted) setState(() => _img = File(x.path));
+  }
+
   Future<void> _tap(Offset rel) async {
     if (_img == null) return;
     await Permission.locationWhenInUse.request();
@@ -1454,8 +1459,10 @@ class _PlantaScreenState extends State<PlantaScreen> {
         }),
         const SizedBox(height: 10),
         Row(children: [
-          Expanded(child: BotaoRun(_img == null ? 'Carregar planta' : 'Trocar planta', cor: kCard2, onTap: _carregar)),
-          const SizedBox(width: 10),
+          Expanded(child: BotaoRun('Galeria', cor: kCard2, onTap: _carregar)),
+          const SizedBox(width: 8),
+          Expanded(child: BotaoRun('Câmera', cor: kCard2, onTap: _carregarCamera)),
+          const SizedBox(width: 8),
           IconButton.filledTonal(onPressed: _pts.isEmpty ? null : () => setState(() => _pts.clear()), icon: const Icon(Icons.delete_outline)),
         ]),
         Container(margin: const EdgeInsets.only(top: 10), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)), child: Text(_medindo ? 'medindo ponto...' : _diag(), style: const TextStyle(color: kTxt, fontSize: 13))),
