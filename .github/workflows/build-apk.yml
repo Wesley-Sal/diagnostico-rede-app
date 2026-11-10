@@ -21,6 +21,7 @@ jobs:
       - name: Instalar Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: 3.27.4
           channel: stable
 
       - name: Criar estrutura do projeto Flutter (android)
@@ -29,8 +30,8 @@ jobs:
       - name: Colocar o nosso código
         run: cp app_src/main.dart lib/main.dart
 
-      - name: Adicionar os plugins
-        run: flutter pub add wifi_scan network_info_plus permission_handler http
+      - name: Adicionar os plugins (versões estáveis fixadas)
+        run: flutter pub add wifi_scan:^0.4.1 network_info_plus:^5.0.3 permission_handler:^11.3.1 http:^1.2.0
 
       - name: Injetar permissões no AndroidManifest
         run: |
