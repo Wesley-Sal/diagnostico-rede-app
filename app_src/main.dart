@@ -147,7 +147,6 @@ class HomePage extends StatelessWidget {
     MenuItem(Icons.sports_esports, Color(0xFFEC4899), 'Qualidade', QualidadeScreen()),
     MenuItem(Icons.qr_code_2, Color(0xFF60A5FA), 'QR Wi-Fi', QrWifiScreen()),
     MenuItem(Icons.router, Color(0xFFF59E0B), 'Roteador', RoteadorScreen()),
-    MenuItem(Icons.directions_walk, Color(0xFF22C55E), 'Caminhada', CaminhadaScreen()),
     MenuItem(Icons.map_outlined, Color(0xFFEF4444), 'Planta', PlantaScreen()),
     MenuItem(Icons.history, Color(0xFF06B6D4), 'Histórico', HistoricoScreen()),
     MenuItem(Icons.lock_outline, Color(0xFF8B5CF6), 'Senha', SenhaScreen()),
@@ -725,21 +724,13 @@ class _DnsScreenState extends State<DnsScreen> {
   }
 }
 
-// ========================= MAPA POR CÔMODOS (dBm, 2.4 e 5 GHz) =========================
+// ========================= MAPA + CAMINHADA (cômodos, distância, repetidor) =========================
 class _Comodo {
   String nome;
-  int? r24; // dBm
-  int? r5;  // dBm
-  _Comodo(this.nome);
-}
-
-String qualDbm(int? d) {
-  if (d == null) return '';
-  if (d >= -55) return 'ótimo';
-  if (d >= -65) return 'bom';
-  if (d >= -72) return 'ok';
-  if (d >= -80) return 'fraco';
-  return 'ruim';
+  Offset pos;
+  int? r24;
+  int? r5;
+  _Comodo(this.nome, this.pos, this.r24, this.r5);
 }
 
 class MapaScreen extends StatefulWidget {
@@ -747,122 +738,189 @@ class MapaScreen extends StatefulWidget {
   @override
   State<MapaScreen> createState() => _MapaScreenState();
 }
-
 class _MapaScreenState extends State<MapaScreen> {
+  // caminhada
+  bool _rodando = false;
+  double _heading = 0;
+  Offset _pos = Offset.zero;
+  DateTime _lastStep = DateTime.fromMillisecondsSinceEpoch(0);
+  StreamSubscription? _acc, _mag;
+  static const double _passoM = 0.7;
+  // dados
+  Offset? _router;
   final List<_Comodo> _comodos = [];
+  String _banda = '2.4';
   String? _ssid;
-  bool _medindo = false;
+  bool _ocupado = false;
 
   Future<(int?, int?)> _medir() async {
     try {
       final can = await WiFiScan.instance.canStartScan();
-      if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(milliseconds: 600)); }
+      if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(milliseconds: 500)); }
       final res = await WiFiScan.instance.getScannedResults();
       _ssid ??= (await NetworkInfo().getWifiName())?.replaceAll('"', '');
       Iterable<WiFiAccessPoint> meu = res;
       if (_ssid != null && _ssid!.isNotEmpty) { final f = res.where((r) => r.ssid == _ssid); if (f.isNotEmpty) meu = f; }
-      int? best(String b) {
-        final g = meu.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == b);
-        return g.isEmpty ? null : g.map((r) => r.level).reduce(max); // dBm (max = mais forte)
-      }
+      int? best(String b) { final g = meu.where((r) => bandaDoCanal(canalDaFrequencia(r.frequency)) == b); return g.isEmpty ? null : g.map((r) => r.level).reduce(max); }
       return (best('2.4'), best('5'));
     } catch (_) { return (null, null); }
   }
 
-  Future<void> _medirComodo(_Comodo c) async {
+  Future<void> _iniciar() async {
     await Permission.locationWhenInUse.request();
-    setState(() => _medindo = true);
-    final (a, b) = await _medir();
-    if (mounted) setState(() { c.r24 = a; c.r5 = b; _medindo = false; });
+    _ssid = (await NetworkInfo().getWifiName())?.replaceAll('"', '');
+    setState(() => _rodando = true);
+    _mag = magnetometerEvents.listen((e) { _heading = atan2(e.y, e.x); });
+    _acc = userAccelerometerEvents.listen((e) {
+      final m = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+      final now = DateTime.now();
+      if (m > 2.2 && now.difference(_lastStep).inMilliseconds > 350) {
+        _lastStep = now;
+        _pos += Offset(cos(_heading), sin(_heading)) * _passoM;
+        setState(() {});
+      }
+    });
   }
+  void _parar() { _acc?.cancel(); _mag?.cancel(); setState(() => _rodando = false); }
+  @override
+  void dispose() { _acc?.cancel(); _mag?.cancel(); super.dispose(); }
 
-  void _novo() {
+  void _marcarRouter() => setState(() => _router = _pos);
+
+  Future<void> _addComodo() async {
     final ctrl = TextEditingController();
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    final nome = await showDialog<String>(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: kCard,
-      title: const Text('Novo cômodo', style: TextStyle(color: kTxt)),
-      content: TextField(controller: ctrl, autofocus: true, style: const TextStyle(color: kTxt), decoration: campoDeco('ex: Sala, Quarto, Cozinha')),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
-        FilledButton(onPressed: () { final n = ctrl.text.trim(); Navigator.pop(ctx); setState(() => _comodos.add(_Comodo(n.isEmpty ? 'Cômodo ${_comodos.length + 1}' : n))); }, child: const Text('Adicionar')),
-      ],
+      title: const Text('Nome do cômodo', style: TextStyle(color: kTxt)),
+      content: TextField(controller: ctrl, autofocus: true, style: const TextStyle(color: kTxt), decoration: campoDeco('ex: Sala, Quarto...')),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')), FilledButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: const Text('Medir aqui'))],
     ));
+    if (nome == null) return;
+    await Permission.locationWhenInUse.request();
+    setState(() => _ocupado = true);
+    final (a, b) = await _medir();
+    if (mounted) setState(() { _comodos.add(_Comodo(nome.isEmpty ? 'Cômodo ${_comodos.length + 1}' : nome, _pos, a, b)); _ocupado = false; });
   }
 
-  Widget _barraBanda(String banda, int? dbm) {
-    final pct = dbm == null ? 0 : rssiParaPorcento(dbm);
-    final cor = dbm == null ? kCard2 : corSinal(pct);
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Row(children: [
-        SizedBox(width: 54, child: Text('$banda GHz', style: const TextStyle(color: kMuted, fontSize: 12))),
-        Expanded(child: ClipRRect(borderRadius: BorderRadius.circular(8), child: LinearProgressIndicator(value: pct / 100, minHeight: 12, backgroundColor: kCard2, color: cor))),
-        const SizedBox(width: 8),
-        SizedBox(width: 118, child: Text(dbm == null ? '—' : '$dbm dBm ($pct%) ${qualDbm(dbm)}', textAlign: TextAlign.right, style: TextStyle(color: dbm == null ? kMuted : cor, fontSize: 11, fontWeight: FontWeight.w600))),
-      ]),
-    );
-  }
+  int? _v(_Comodo c) => _banda == '2.4' ? c.r24 : c.r5;
+  double? _dist(_Comodo c) => _router == null ? null : (c.pos - _router!).distance;
 
   String _diag() {
-    final m24 = _comodos.where((c) => c.r24 != null).toList();
-    final m5 = _comodos.where((c) => c.r5 != null).toList();
-    if (m24.isEmpty && m5.isEmpty) return 'Cadastre os cômodos e meça o sinal em cada um para o diagnóstico.';
-    final sb = StringBuffer();
-    void banda(String nome, List<_Comodo> lista, int? Function(_Comodo) f) {
-      if (lista.isEmpty) return;
-      final melhor = lista.reduce((a, b) => f(a)! >= f(b)! ? a : b);
-      final piores = lista.where((c) => rssiParaPorcento(f(c)!) < 40).toList();
-      sb.writeln('$nome — melhor ponto: ${melhor.nome} (${f(melhor)} dBm).');
-      if (piores.isNotEmpty) {
-        sb.writeln('  ⚠ Repetidor recomendado: ${piores.map((c) => c.nome).join(", ")} com sinal fraco. Instale um repetidor/mesh entre o roteador e ${piores.first.nome}.');
-      } else {
-        sb.writeln('  ✓ Cobertura boa — sem necessidade aparente de repetidor.');
-      }
+    if (_comodos.isEmpty) return 'Inicie a caminhada, marque o roteador e cadastre os cômodos pela casa.';
+    final medidos = _comodos.where((c) => _v(c) != null).toList();
+    if (medidos.isEmpty) return 'Cômodos sem medição nesta banda.';
+    final melhor = medidos.reduce((a, b) => _v(a)! >= _v(b)! ? a : b);
+    final fracos = medidos.where((c) => rssiParaPorcento(_v(c)!) < 40).toList();
+    final sb = StringBuffer('Banda $_banda GHz — melhor: ${melhor.nome} (${_v(melhor)} dBm / ${rssiParaPorcento(_v(melhor)!)}%)');
+    if (fracos.isNotEmpty) {
+      final f = fracos.map((c) { final d = _dist(c); return '${c.nome}${d != null ? " (${d.toStringAsFixed(1)} m)" : ""}'; }).join(', ');
+      sb.write('\n⚠ Repetidor recomendado — cômodos fracos: $f.');
+      if (_router != null) sb.write('\nInstale o repetidor no meio do caminho entre o roteador e esses cômodos.');
+    } else {
+      sb.write('\n✓ Cobertura boa nesta banda — sem necessidade de repetidor.');
     }
-    banda('2.4 GHz', m24, (c) => c.r24);
-    banda('5 GHz', m5, (c) => c.r5);
-    if (m5.isNotEmpty) sb.writeln('Obs.: o 5 GHz alcança menos que o 2.4; é normal cair mais rápido longe do roteador.');
-    return sb.toString().trim();
+    return sb.toString();
   }
 
   @override
   Widget build(BuildContext context) {
     return ListView(children: [
-      Secao(
-        titulo: '📍 Mapa de Sinal por Cômodo',
-        desc: 'Cadastre os cômodos da casa e meça o sinal em cada um. Mostra a potência em dBm (e %) no 2.4 e 5 GHz, e aponta onde pega melhor e se precisa de repetidor.',
-        filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Text(_medindo ? 'medindo...' : '${_comodos.length} cômodo(s)', style: const TextStyle(color: kMuted, fontSize: 13)),
-            TextButton.icon(onPressed: _novo, icon: const Icon(Icons.add, size: 18), label: const Text('Cômodo')),
-          ]),
-          if (_comodos.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('Nenhum cômodo. Toque em "Cômodo", vá até o local e meça.', style: TextStyle(color: kMuted, fontSize: 13))),
-          ..._comodos.map((c) => Container(
-                margin: const EdgeInsets.symmetric(vertical: 6),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(12)),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Row(children: [
-                    Expanded(child: Text(c.nome, style: const TextStyle(fontWeight: FontWeight.w700, color: kTxt))),
-                    TextButton(onPressed: () => _medirComodo(c), child: const Text('Medir aqui')),
-                    IconButton(onPressed: () => setState(() => _comodos.remove(c)), icon: const Icon(Icons.close, color: kMuted, size: 18)),
-                  ]),
-                  _barraBanda('2.4', c.r24),
-                  _barraBanda('5', c.r5),
-                ]),
-              )),
-          if (_comodos.any((c) => c.r24 != null || c.r5 != null)) Container(
-            margin: const EdgeInsets.only(top: 10),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(10), border: Border.all(color: kLine)),
-            child: Text(_diag(), style: const TextStyle(color: kTxt, fontSize: 13)),
-          ),
-          const SizedBox(height: 8),
-          const Text('Como usar: adicione um cômodo, vá fisicamente até ele e toque em "Medir aqui". Repita em cada parte da casa.', style: TextStyle(color: kMuted, fontSize: 11)),
+      Secao(titulo: '📍 Mapa de Sinal (caminhando)', desc: 'Inicie a caminhada, toque em "Marcar roteador" ao lado dele, ande pela casa e cadastre cada cômodo. Mostra o sinal, a distância até o roteador e se precisa de repetidor.', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: ['2.4', '5'].map((b) {
+          final sel = _banda == b;
+          return Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: GestureDetector(
+            onTap: () => setState(() => _banda = b),
+            child: Container(padding: const EdgeInsets.symmetric(vertical: 9), alignment: Alignment.center, decoration: BoxDecoration(gradient: sel ? const LinearGradient(colors: [kAccent, kAccent2]) : null, color: sel ? null : kCard2, borderRadius: BorderRadius.circular(10)), child: Text('$b GHz', style: TextStyle(color: sel ? const Color(0xFF041320) : kMuted, fontWeight: FontWeight.w700))),
+          )));
+        }).toList()),
+        const SizedBox(height: 12),
+        Container(
+          height: 300,
+          decoration: BoxDecoration(color: const Color(0xFF0A1020), borderRadius: BorderRadius.circular(12), border: Border.all(color: kLine)),
+          clipBehavior: Clip.antiAlias,
+          child: CustomPaint(painter: _MapPainter(_comodos, _router, _pos, _banda), child: const SizedBox.expand()),
+        ),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(child: BotaoRun(_rodando ? 'Parar' : 'Iniciar', cor: _rodando ? kBad : kOk, onTap: _rodando ? _parar : _iniciar)),
+          const SizedBox(width: 8),
+          Expanded(child: BotaoRun('Marcar roteador', cor: kCard2, onTap: _rodando ? _marcarRouter : null)),
         ]),
-      ),
+        const SizedBox(height: 8),
+        BotaoRun(_ocupado ? 'Medindo...' : '+ Cadastrar cômodo aqui', onTap: (_rodando && !_ocupado) ? _addComodo : null),
+        const SizedBox(height: 12),
+        ..._comodos.map((c) {
+          final v = _v(c);
+          final pct = v == null ? 0 : rssiParaPorcento(v);
+          final d = _dist(c);
+          return Container(
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: kCard2, borderRadius: BorderRadius.circular(10)),
+            child: Row(children: [
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(c.nome, style: const TextStyle(fontWeight: FontWeight.w700, color: kTxt)),
+                Text('${v == null ? "—" : "$v dBm ($pct%)"}${d != null ? "  •  ${d.toStringAsFixed(1)} m do roteador" : ""}', style: TextStyle(color: v == null ? kMuted : corSinal(pct), fontSize: 12)),
+              ])),
+              IconButton(onPressed: () => setState(() => _comodos.remove(c)), icon: const Icon(Icons.close, color: kMuted, size: 18)),
+            ]),
+          );
+        }),
+        Container(margin: const EdgeInsets.only(top: 8), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: kCard, borderRadius: BorderRadius.circular(10), border: Border.all(color: kLine)), child: Text(_diag(), style: const TextStyle(color: kTxt, fontSize: 13))),
+        const SizedBox(height: 8),
+        const Text('Experimental: o trajeto usa sensores e tem desvio em ambiente fechado. A distância é uma estimativa.', style: TextStyle(color: kMuted, fontSize: 11)),
+      ])),
     ]);
   }
+}
+
+class _MapPainter extends CustomPainter {
+  final List<_Comodo> comodos;
+  final Offset? router;
+  final Offset atual;
+  final String banda;
+  _MapPainter(this.comodos, this.router, this.atual, this.banda);
+  int? _v(_Comodo c) => banda == '2.4' ? c.r24 : c.r5;
+  @override
+  void paint(Canvas canvas, Size size) {
+    final todos = <Offset>[...comodos.map((c) => c.pos), atual, if (router != null) router!];
+    double minX = todos.map((p) => p.dx).reduce(min), maxX = todos.map((p) => p.dx).reduce(max);
+    double minY = todos.map((p) => p.dy).reduce(min), maxY = todos.map((p) => p.dy).reduce(max);
+    final larg = (maxX - minX).abs() < 1 ? 1.0 : (maxX - minX);
+    final alt = (maxY - minY).abs() < 1 ? 1.0 : (maxY - minY);
+    const pad = 36.0;
+    final escala = min((size.width - 2 * pad) / larg, (size.height - 2 * pad) / alt);
+    Offset proj(Offset p) => Offset(pad + (p.dx - minX) * escala, pad + (p.dy - minY) * escala);
+    // linhas roteador->cômodos
+    if (router != null) {
+      final rp = proj(router!);
+      for (final c in comodos) { canvas.drawLine(rp, proj(c.pos), Paint()..color = kLine..strokeWidth = 1); }
+    }
+    // cômodos
+    for (final c in comodos) {
+      final o = proj(c.pos);
+      final v = _v(c);
+      canvas.drawCircle(o, 9, Paint()..color = (v == null ? Colors.grey : corSinal(rssiParaPorcento(v))).withValues(alpha: .9));
+      final tp = TextPainter(text: TextSpan(text: c.nome, style: const TextStyle(color: kTxt, fontSize: 10)), textDirection: TextDirection.ltr)..layout();
+      tp.paint(canvas, o + const Offset(11, -6));
+    }
+    // roteador
+    if (router != null) {
+      final rp = proj(router!);
+      canvas.drawCircle(rp, 11, Paint()..color = kAccent2);
+      final tp = TextPainter(text: const TextSpan(text: '📶', style: TextStyle(fontSize: 14)), textDirection: TextDirection.ltr)..layout();
+      tp.paint(canvas, rp - const Offset(8, 9));
+    }
+    // posição atual
+    final a = proj(atual);
+    canvas.drawCircle(a, 6, Paint()..color = Colors.white);
+    if (comodos.isEmpty && router == null) {
+      final tp = TextPainter(text: const TextSpan(text: 'Inicie e marque o roteador', style: TextStyle(color: kMuted, fontSize: 12)), textDirection: TextDirection.ltr)..layout();
+      tp.paint(canvas, Offset((size.width - tp.width) / 2, size.height / 2));
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _MapPainter old) => true;
 }
 
 // ========================= VELOCIDADE (com servidores) =========================
@@ -1521,138 +1579,6 @@ class _HistoricoScreenState extends State<HistoricoScreen> {
       ])),
     ]);
   }
-}
-
-
-// ========================= MAPA POR CAMINHADA (sensores) =========================
-class _WP {
-  final Offset pos;
-  final int? sinal;
-  _WP(this.pos, this.sinal);
-}
-
-class CaminhadaScreen extends StatefulWidget {
-  const CaminhadaScreen({super.key});
-  @override
-  State<CaminhadaScreen> createState() => _CaminhadaScreenState();
-}
-class _CaminhadaScreenState extends State<CaminhadaScreen> {
-  bool _rodando = false;
-  int _passos = 0;
-  double _heading = 0;
-  Offset _pos = Offset.zero;
-  DateTime _lastStep = DateTime.fromMillisecondsSinceEpoch(0);
-  final List<_WP> _pts = [];
-  String? _ssid;
-  StreamSubscription? _acc, _mag;
-  Timer? _sample;
-  static const double _passoM = 0.7;
-
-  Future<int?> _sinalAtual() async {
-    try {
-      final can = await WiFiScan.instance.canStartScan();
-      if (can == CanStartScan.yes) { await WiFiScan.instance.startScan(); await Future.delayed(const Duration(milliseconds: 400)); }
-      final res = await WiFiScan.instance.getScannedResults();
-      Iterable<WiFiAccessPoint> meu = res;
-      if (_ssid != null && _ssid!.isNotEmpty) { final f = res.where((r) => r.ssid == _ssid); if (f.isNotEmpty) meu = f; }
-      if (meu.isEmpty) return null;
-      return rssiParaPorcento(meu.map((r) => r.level).reduce(max));
-    } catch (_) { return null; }
-  }
-
-  Future<void> _iniciar() async {
-    await Permission.locationWhenInUse.request();
-    _ssid = (await NetworkInfo().getWifiName())?.replaceAll('"', '');
-    setState(() { _rodando = true; _passos = 0; _pos = Offset.zero; _pts.clear(); });
-    _mag = magnetometerEvents.listen((e) { _heading = atan2(e.y, e.x); });
-    _acc = userAccelerometerEvents.listen((e) {
-      final m = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
-      final now = DateTime.now();
-      if (m > 2.2 && now.difference(_lastStep).inMilliseconds > 350) {
-        _lastStep = now;
-        _passos++;
-        _pos += Offset(cos(_heading), sin(_heading)) * _passoM;
-        setState(() {});
-      }
-    });
-    _sample = Timer.periodic(const Duration(milliseconds: 1500), (_) async {
-      final s = await _sinalAtual();
-      if (mounted) setState(() => _pts.add(_WP(_pos, s)));
-    });
-  }
-
-  void _parar() { _acc?.cancel(); _mag?.cancel(); _sample?.cancel(); setState(() => _rodando = false); }
-
-  @override
-  void dispose() { _acc?.cancel(); _mag?.cancel(); _sample?.cancel(); super.dispose(); }
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(children: [
-      Secao(titulo: '🚶 Mapa por Caminhada', desc: 'Ande pela casa com o celular na mão (tela pra cima). O app traça seu trajeto pelos sensores e colore pelo sinal (verde = forte, vermelho = fraco).', filho: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Container(
-          height: 320,
-          decoration: BoxDecoration(color: const Color(0xFF0A1020), borderRadius: BorderRadius.circular(12), border: Border.all(color: kLine)),
-          clipBehavior: Clip.antiAlias,
-          child: CustomPaint(painter: _WalkPainter(_pts, _pos, _rodando), child: const SizedBox.expand()),
-        ),
-        const SizedBox(height: 10),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-          _s('$_passos', 'passos'),
-          _s('${_pts.length}', 'medições'),
-          _s('${(_passos * _passoM).toStringAsFixed(0)} m', 'distância'),
-        ]),
-        const SizedBox(height: 12),
-        BotaoRun(_rodando ? 'Parar' : 'Iniciar caminhada', cor: _rodando ? kBad : kOk, onTap: _rodando ? _parar : _iniciar),
-        const SizedBox(height: 8),
-        const Text('Experimental: bússola e passos têm desvio em ambientes fechados, então o traçado é aproximado. Ande em ritmo constante e segure o celular estável.', style: TextStyle(color: kMuted, fontSize: 11)),
-      ])),
-    ]);
-  }
-  Widget _s(String v, String l) => Column(children: [
-        Text(v, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kAccent)),
-        Text(l, style: const TextStyle(fontSize: 10, color: kMuted)),
-      ]);
-}
-
-class _WalkPainter extends CustomPainter {
-  final List<_WP> pts;
-  final Offset atual;
-  final bool rodando;
-  _WalkPainter(this.pts, this.atual, this.rodando);
-  @override
-  void paint(Canvas canvas, Size size) {
-    final todos = [...pts.map((p) => p.pos), atual];
-    double minX = todos.map((p) => p.dx).reduce(min), maxX = todos.map((p) => p.dx).reduce(max);
-    double minY = todos.map((p) => p.dy).reduce(min), maxY = todos.map((p) => p.dy).reduce(max);
-    final larg = (maxX - minX).abs() < 1 ? 1.0 : (maxX - minX);
-    final alt = (maxY - minY).abs() < 1 ? 1.0 : (maxY - minY);
-    const pad = 30.0;
-    final escala = min((size.width - 2 * pad) / larg, (size.height - 2 * pad) / alt);
-    Offset proj(Offset p) => Offset(pad + (p.dx - minX) * escala, pad + (p.dy - minY) * escala);
-    // trilha
-    if (pts.length > 1) {
-      final path = Path()..moveTo(proj(pts.first.pos).dx, proj(pts.first.pos).dy);
-      for (final p in pts.skip(1)) { final o = proj(p.pos); path.lineTo(o.dx, o.dy); }
-      canvas.drawPath(path, Paint()..color = kLine..strokeWidth = 2..style = PaintingStyle.stroke);
-    }
-    // pontos
-    for (final p in pts) {
-      final o = proj(p.pos);
-      final cor = p.sinal == null ? Colors.grey : corSinal(p.sinal!);
-      canvas.drawCircle(o, 7, Paint()..color = cor.withValues(alpha: .85));
-    }
-    // posição atual
-    final a = proj(atual);
-    canvas.drawCircle(a, 9, Paint()..color = kAccent);
-    canvas.drawCircle(a, 9, Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 2);
-    if (pts.isEmpty) {
-      final tp = TextPainter(text: const TextSpan(text: 'Toque em Iniciar e ande pela casa', style: TextStyle(color: kMuted, fontSize: 12)), textDirection: TextDirection.ltr)..layout();
-      tp.paint(canvas, Offset((size.width - tp.width) / 2, size.height / 2));
-    }
-  }
-  @override
-  bool shouldRepaint(covariant _WalkPainter old) => true;
 }
 
 
